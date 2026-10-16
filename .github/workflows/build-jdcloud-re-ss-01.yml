@@ -1,0 +1,210 @@
+# ==========================================================
+#  GitHub Actions 在线编译 Kwrt 固件
+#  机型：京东云亚瑟 JDCloud RE-SS-01（IPQ6000 / qualcommax-ipq60xx）
+#  特性：无 WiFi / 有 USB / NSS 硬件加速 / opkg / ssr-plus
+#
+#  这是一个「独立配置仓库」——不需要 fork kiddin9/Kwrt。
+#  构建时自动从上游 Kwrt 25.12 分支拉取 devices/ 基础设施，
+#  再用本仓库的 devices/qualcommax_ipq60xx/ 覆盖上去。
+#  用法：把文件推到自己的仓库 → Actions → Run workflow
+# ==========================================================
+
+name: Build Kwrt for JDCloud RE-SS-01
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'devices/**'
+      - '.github/workflows/**'
+
+env:
+  TZ: Asia/Shanghai
+  TARGET: qualcommax_ipq60xx
+  KWRT_REPO: https://github.com/kiddin9/Kwrt.git
+  KWRT_BRANCH: '25.12'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build ${{ matrix.target }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [qualcommax_ipq60xx]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # 从上游 Kwrt 拉取构建基础设施（devices/ 目录）
+    # 只做稀疏检出，不拉整个 OpenWrt 源码树，几十秒即可
+    - name: Fetch Kwrt base (upstream devices)
+      run: |
+        git clone --depth 1 --filter=blob:none --sparse \
+          -b "${{ env.KWRT_BRANCH }}" "${{ env.KWRT_REPO }}" kwrt-base
+        cd kwrt-base
+        git sparse-checkout set devices
+        cd ..
+        echo "上游 devices 顶层："
+        ls kwrt-base/devices/
+        # -n = 不覆盖已存在文件：本仓库的定制配置优先，其余从上游补齐
+        cp -rn kwrt-base/devices/. ./devices/
+        echo ""
+        echo "合并后 devices/qualcommax_ipq60xx/："
+        ls -la devices/qualcommax_ipq60xx/
+        echo ""
+        echo "合并后 devices/common/："
+        ls -la devices/common/
+
+    - name: Load Settings.ini
+      run: |
+        source "${{ github.workspace }}/devices/common/settings.ini"
+        if [ -f "devices/${{ matrix.target }}/settings.ini" ]; then
+          source "${{ github.workspace }}/devices/${{ matrix.target }}/settings.ini"
+        fi
+        echo "CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
+        echo "DIY_SH=${DIY_SH}" >> $GITHUB_ENV
+        sed -i "1a TARGET=${{ matrix.target }}" ${{ github.workspace }}/devices/common/diy.sh
+        sed -i "1a REPO_TOKEN=${{ secrets.TOKEN_KIDDIN9 }}" ${{ github.workspace }}/devices/common/diy.sh
+
+    - name: Free disk space
+      uses: coder-xiaomo/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk \
+        gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+        python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+        llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils ccache rename \
+        libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "Asia/Shanghai"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+
+    - name: Clone source code
+      run: |
+        git clone -b openwrt-25.12 --depth 1 https://github.com/openwrt/openwrt openwrt
+
+    - name: Free up disk space
+      run: |
+        sudo mkdir -p -m 777 /mnt/openwrt/build_dir openwrt/staging_dir
+        ln -sf /mnt/openwrt/build_dir openwrt/build_dir
+        sudo ln -sf openwrt/staging_dir /mnt/openwrt/staging_dir
+
+    - name: Load custom configuration
+      run: |
+        function git_clone_path() {
+          trap 'rm -rf "$tmpdir"' EXIT
+          branch="$1" rurl="$2" mv="$3"
+          [[ "$mv" != "mv" ]] && shift 2 || shift 3
+          rootdir="$PWD"
+          tmpdir="$(mktemp -d)" || exit 1
+          if [ ${#branch} -lt 10 ]; then
+          git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          else
+          git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+          cd "$tmpdir"
+          git checkout $branch
+          fi
+          if [ "$?" != "0" ]; then
+            echo "error on $rurl"
+            exit 1
+          fi
+          git sparse-checkout init --cone
+          git sparse-checkout set $@
+          [[ "$mv" != "mv" ]] && cp -rn ./* $rootdir/ || mv -n $@/* $rootdir/$@/
+          cd $rootdir
+          }
+        export -f git_clone_path
+        mkdir -p openwrt
+        cp -rf devices/common/. openwrt/
+        cp -rf devices/${{ matrix.target }}/. openwrt/
+        cp -rf devices openwrt/
+        cd openwrt
+        chmod +x devices/common/$DIY_SH
+        /bin/bash "devices/common/$DIY_SH"
+        cp -f devices/common/$CONFIG_FILE .config
+        if [ -f "devices/${{ matrix.target }}/$CONFIG_FILE" ]; then
+          echo >> .config
+          cat devices/${{ matrix.target }}/$CONFIG_FILE >> .config
+        fi
+        if [ -f "devices/${{ matrix.target }}/$DIY_SH" ]; then
+          chmod +x devices/${{ matrix.target }}/$DIY_SH
+          echo "/bin/bash devices/${{ matrix.target }}/$DIY_SH"
+          /bin/bash "devices/${{ matrix.target }}/$DIY_SH"
+        fi
+        cp -Rf ./diy/* ./ || true
+
+    - name: Apply patches
+      run: |
+        cd openwrt
+        cp -rn devices/common/patches devices/${{ matrix.target }}/
+        if [ -n "$(ls -A devices/${{ matrix.target }}/patches/*.bin.patch 2>/dev/null)" ]; then
+          git apply devices/${{ matrix.target }}/patches/*.bin.patch || echo "bin.patch skipped"
+        fi
+        find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.revert.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' -R --no-backup-if-mismatch -p1 -F 1 -i '%' || echo 'revert skipped: %'"
+        find "devices/${{ matrix.target }}/patches" -maxdepth 1 -type f -name '*.patch' ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 | sort -z | xargs -I % -t -0 -n 1 sh -c "patch -d './' --no-backup-if-mismatch -p1 -F 1 -i '%' || echo 'patch skipped: %'"
+
+    - name: Defconfig
+      run: |
+        cd openwrt
+        make defconfig
+        if [[ ! "${{ matrix.target }}" =~ (amlogic_meson8b|armsr_armv8|bcm27xx_*|rockchip_armv8|sunxi_*|x86_*|siflower_*) ]]; then
+        sed -n '/# Wireless Drivers/,/# end of Wireless Drivers/p' .config | sed -e 's/=m/=n/' >>.config
+        sed -i "s/\(kmod-qca.*\)=m/\1=n/" .config
+        make defconfig
+        fi
+        echo "=========== 关键配置自检 ==========="
+        grep -E "jdcloud_re-ss-01|USE_APK|PACKAGE_opkg|qca-nss-drv=|qca-nss-ecm=|ssr-plus|usb-dwc3|ath11k|wpad" .config || true
+
+    - name: Cache
+      uses: stupidloud/cachewrtbuild@main
+      with:
+        ccache: 'false'
+        mixkey: ${{ matrix.target }}
+        clean: false
+        prefix: ${{ github.workspace }}/openwrt
+
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(($(nproc)+1)) thread compile"
+        make -j$(($(nproc)+1)) || make -j1 V=s
+        df -hT
+
+    - name: Organize files
+      id: organize
+      continue-on-error: true
+      run: |
+        cd openwrt/bin/targets/qualcommax/ipq60xx/
+        cp ${{ github.workspace }}/openwrt/.config jdcloud_re-ss-01.config || true
+        ls -lh
+
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kwrt-jdcloud-re-ss-01
+        path: openwrt/bin/targets/qualcommax/ipq60xx/
+        if-no-files-found: error
+        retention-days: 30
