@@ -1,0 +1,17 @@
+# 全部强制以 LF 入库，避免 Windows 上被转成 CRLF
+# （shell 脚本带上 CRLF 会在 Linux 构建机上直接报 $'\r': command not found）
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.config  text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.md      text eol=lf
+*.patch   text eol=lf
+*.mk      text eol=lf
+
+# 二进制文件不做转换
+*.png     binary
+*.jpg     binary
+*.gz      binary
+*.tar     binary
