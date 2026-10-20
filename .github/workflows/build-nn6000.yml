@@ -1,0 +1,191 @@
+# ==========================================================
+#  NN6000 v2 云编译（IPQ6000 / qualcommax-ipq60xx）
+#
+#  源码：laipeng668/openwrt-6.x  分支 25.12-nss
+#        = ImmortalWrt 25.12 + qosmio 全套 NSS。qualcommax/Makefile 的
+#          DEFAULT_PACKAGES 里已写死 kmod-qca-nss-dp / drv / ecm /
+#          bridge-mgr 等，NSS 默认就是满血的。
+#
+#  为什么自己编：官方 snapshot 的 kmods 只留最近几个内核版本，设备现用
+#  的 6.12.45 的 kmod 已被上游删除，kmod-tun 装不上；而 Open-Box 只有
+#  tun 一种转发方式，没 tun 核心直接起不来。编进固件最干净。
+#
+#  两个变体并行：core（稳妥）/ ssrplus（挂 helloworld 试编，失败降级）
+#  只在 nn6000 分支触发，不影响 main 上的 JDCloud 构建。
+# ==========================================================
+
+name: Build NN6000 v2 (NSS + TUN)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [nn6000]
+    paths:
+      - 'configs/nn6000-*.config'
+      - '.github/workflows/build-nn6000.yml'
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+  SRC_REPO: https://github.com/laipeng668/openwrt-6.x.git
+  SRC_BRANCH: 25.12-nss
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [core, ssrplus]
+    name: nn6000-v2 / ${{ matrix.variant }}
+
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 腾出磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/lib/node_modules /opt/az /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo apt-get -qq clean
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get -y -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libelf-dev libncurses-dev libssl-dev python3 python3-setuptools python3-venv rsync swig unzip zip zlib1g-dev file wget ccache time libgmp3-dev libmpc-dev
+          df -h /
+
+      - name: 克隆源码
+        run: |
+          git clone --depth 1 -b "$SRC_BRANCH" "$SRC_REPO" openwrt
+          cd openwrt
+          echo "源码提交: $(git rev-parse --short HEAD)"
+          grep -m1 '^LINUX_VERSION-6.12' include/kernel-6.12 || echo "内核版本未知"
+
+      - name: 更新基础 feeds
+        run: |
+          set -o pipefail
+          cd openwrt
+          ./scripts/feeds update -a 2>&1 | tail -15
+          ./scripts/feeds install -a 2>&1 | tail -5
+          echo "----- nss_packages feed -----"
+          ls package/feeds/nss_packages 2>/dev/null | head -10 || echo "未找到 nss_packages"
+
+      - name: 追加 helloworld 源（仅 ssrplus 变体，失败不阻断）
+        if: matrix.variant == 'ssrplus'
+        run: |
+          cd openwrt
+          echo "src-git helloworld https://github.com/fw876/helloworld.git" >> feeds.conf.default
+          ./scripts/feeds update helloworld 2>&1 | tail -8 || echo "::warning::helloworld 更新失败，跳过 ssr-plus"
+          ./scripts/feeds install -a -p helloworld 2>&1 | tail -8 || echo "::warning::helloworld 安装失败，跳过 ssr-plus"
+          echo "----- helloworld 包目录 -----"
+          ls package/feeds/helloworld 2>/dev/null | head -10 || echo "helloworld 未就位"
+
+      - name: 套用配置
+        run: |
+          cd openwrt
+          cp "$GITHUB_WORKSPACE/configs/nn6000-${{ matrix.variant }}.config" .config
+          mkdir -p package/base-files/files/etc/uci-defaults
+          TARGET_UCI=package/base-files/files/etc/uci-defaults/99-nn6000
+          echo '#!/bin/sh' > $TARGET_UCI
+          echo 'uci -q get luci.main >/dev/null 2>&1 || uci set luci.main=core' >> $TARGET_UCI
+          echo "uci -q set luci.main.mediaurlbase='/luci-static/argon'" >> $TARGET_UCI
+          echo "uci -q set luci.main.lang='zh_cn'" >> $TARGET_UCI
+          echo 'uci commit luci 2>/dev/null' >> $TARGET_UCI
+          echo 'exit 0' >> $TARGET_UCI
+          chmod +x $TARGET_UCI
+          make defconfig
+          cp .config "$GITHUB_WORKSPACE/nn6000-${{ matrix.variant }}.result.config"
+
+      - name: 关键能力自检
+        run: |
+          cd openwrt
+          fail=0
+          chk() {
+            if grep -qE "^$1=(y|m)$" .config; then
+              echo "  OK   $1"
+            else
+              echo "  MISS $1"
+              fail=1
+            fi
+          }
+          echo "---------- 目标设备 ----------"
+          chk CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_link_nn6000-v2
+          echo "---------- Open-Box 必需 ----------"
+          chk CONFIG_PACKAGE_kmod-tun
+          chk CONFIG_PACKAGE_kmod-veth
+          chk CONFIG_PACKAGE_kmod-nft-queue
+          chk CONFIG_PACKAGE_kmod-nft-tproxy
+          chk CONFIG_PACKAGE_ip-full
+          echo "---------- NSS 全套（缺一个就没有硬件加速）----------"
+          chk CONFIG_PACKAGE_kmod-qca-nss-dp
+          chk CONFIG_PACKAGE_kmod-qca-nss-drv
+          chk CONFIG_PACKAGE_kmod-qca-nss-ecm
+          chk CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr
+          echo "---------- 软件 ----------"
+          for p in luci-app-passwall luci-theme-argon luci-app-ttyd; do
+            if grep -qE "^CONFIG_PACKAGE_$p=(y|m)$" .config; then
+              echo "  OK   $p"
+            else
+              echo "  WARN $p 未选中（不阻断）"
+            fi
+          done
+          if grep -qE "^CONFIG_PACKAGE_luci-app-ssr-plus=(y|m)$" .config; then
+            echo "  OK   ssr-plus 已启用"
+          else
+            echo "  WARN ssr-plus 未进入配置，将产出纯 passwall 版"
+          fi
+          if [ "$fail" = "1" ]; then
+            echo "::error::关键能力缺失，终止编译（避免编出没有 tun 或没有 NSS 的废固件）"
+            exit 1
+          fi
+          echo "自检通过"
+
+      - name: 下载源码包
+        run: |
+          set -o pipefail
+          cd openwrt
+          make -j"$(nproc)" download 2>&1 | tail -30 || make -j1 V=s download 2>&1 | tail -50
+
+      - name: 编译固件
+        run: |
+          set -o pipefail
+          cd openwrt
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee "$GITHUB_WORKSPACE/build-${{ matrix.variant }}.log" | tail -150
+
+      - name: 收集产物
+        if: success()
+        run: |
+          OUT="$GITHUB_WORKSPACE/out-${{ matrix.variant }}"
+          mkdir -p "$OUT"
+          cd openwrt/bin/targets/qualcommax/ipq60xx
+          ls -lh
+          cp -v *.bin "$OUT/" 2>/dev/null || true
+          cp -v sha256sums profiles.json "$OUT/" 2>/dev/null || true
+          cp -v "$GITHUB_WORKSPACE/nn6000-${{ matrix.variant }}.result.config" "$OUT/" || true
+          echo "===== 最终产物 ====="
+          ls -lh "$OUT"
+          ls "$OUT"/*nn6000-v2*.bin >/dev/null 2>&1 || echo "::error::没有产出 nn6000-v2 的 .bin"
+
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v2-${{ matrix.variant }}
+          path: out-${{ matrix.variant }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传失败日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v2-${{ matrix.variant }}-log
+          path: |
+            build-${{ matrix.variant }}.log
+            nn6000-${{ matrix.variant }}.result.config
+          if-no-files-found: warn
+          retention-days: 7
