@@ -100,6 +100,25 @@ jobs:
           make defconfig
           cp .config "$GITHUB_WORKSPACE/nn6000-${{ matrix.variant }}.result.config"
 
+      - name: 导出配置快照（便于远程诊断）
+        run: |
+          cd openwrt
+          mkdir -p "$GITHUB_WORKSPACE/reports"
+          OUT="$GITHUB_WORKSPACE/reports/config-${{ matrix.variant }}.txt"
+          echo "# nn6000-${{ matrix.variant }} 的 .config 关键行" > "$OUT"
+          echo "# 生成时间 $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$OUT"
+          echo "==== 目标/设备 ====" >> "$OUT"
+          grep -E "^CONFIG_TARGET" .config >> "$OUT" 2>/dev/null || echo "(无)" >> "$OUT"
+          echo "==== 内核能力 ====" >> "$OUT"
+          grep -E "^CONFIG_PACKAGE_kmod-(tun|veth|nft-queue|nft-tproxy|nft-nat|nft-socket|nfnetlink-queue)=" .config >> "$OUT" 2>/dev/null || echo "(无)" >> "$OUT"
+          echo "==== NSS ====" >> "$OUT"
+          grep -E "^CONFIG_PACKAGE_(kmod-qca-nss|kmod-nss-ifb)" .config >> "$OUT" 2>/dev/null || echo "(无)" >> "$OUT"
+          echo "==== 其他 ====" >> "$OUT"
+          grep -E "^CONFIG_PACKAGE_(ip-full|dnsmasq-full|luci-app-passwall|luci-app-ssr-plus|luci-theme-argon|luci-app-ttyd)=" .config >> "$OUT" 2>/dev/null || echo "(无)" >> "$OUT"
+          echo "==== 未选中的相关项 ====" >> "$OUT"
+          grep -E "^# CONFIG_PACKAGE_(kmod-(tun|veth|nft-queue|nft-tproxy)|kmod-qca-nss|luci-app-ssr-plus) " .config >> "$OUT" 2>/dev/null || echo "(无)" >> "$OUT"
+          cat "$OUT"
+
       - name: 关键能力自检
         run: |
           cd openwrt
@@ -187,5 +206,23 @@ jobs:
           path: |
             build-${{ matrix.variant }}.log
             nn6000-${{ matrix.variant }}.result.config
-          if-no-files-found: warn
-          retention-days: 7
+
+      - name: 回传诊断快照（总是执行）
+        if: always()
+        run: |
+          mkdir -p reports
+          cp -f "$GITHUB_WORKSPACE/reports/"*.txt reports/ 2>/dev/null || true
+          cp -f "$GITHUB_WORKSPACE/nn6000-${{ matrix.variant }}.result.config" reports/ 2>/dev/null || true
+          ls -la reports/ || true
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add -A reports/ 2>/dev/null || true
+          git commit -m "diag: nn6000-${{ matrix.variant }} 配置快照" || echo "没有需要提交的改动"
+          for i in 1 2 3; do
+            if git pull --rebase origin nn6000 && git push origin HEAD:nn6000; then
+              echo "诊断已回传"
+              break
+            fi
+            echo "第 $i 次回传失败，重试"
+            sleep 5
+          done
