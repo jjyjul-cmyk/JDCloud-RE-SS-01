@@ -10,7 +10,7 @@
 #  的 6.12.45 的 kmod 已被上游删除，kmod-tun 装不上；而 Open-Box 只有
 #  tun 一种转发方式，没 tun 核心直接起不来。编进固件最干净。
 #
-#  两个变体并行：core（稳妥）/ ssrplus（挂 helloworld 试编，失败降级）
+#  单变体：NSS + TUN + Open-Box + ShadowSocksR Plus+（不含 passwall）
 #  只在 nn6000 分支触发，不影响 main 上的 JDCloud 构建。
 # ==========================================================
 
@@ -18,6 +18,12 @@ name: Build NN6000 v2 (NSS + TUN)
 
 on:
   workflow_dispatch:
+    inputs:
+      oc1512:
+        description: '放开 1.512GHz 超频档'
+        type: choice
+        options: ['yes', 'no']
+        default: 'yes'
   push:
     branches: [nn6000]
     paths:
@@ -39,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [core, ssrplus]
+        variant: [core]
     name: nn6000-v2 / ${{ matrix.variant }}
 
     steps:
@@ -74,15 +80,24 @@ jobs:
           echo "----- nss_packages feed -----"
           ls package/feeds/nss_packages 2>/dev/null | head -10 || echo "未找到 nss_packages"
 
-      - name: 追加 helloworld 源（仅 ssrplus 变体，失败不阻断）
-        if: matrix.variant == 'ssrplus'
+      - name: 追加 helloworld 源（ssr-plus 来源，失败不阻断）
         run: |
           cd openwrt
           echo "src-git helloworld https://github.com/fw876/helloworld.git" >> feeds.conf.default
-          ./scripts/feeds update helloworld 2>&1 | tail -8 || echo "::warning::helloworld 更新失败，跳过 ssr-plus"
-          ./scripts/feeds install -a -p helloworld 2>&1 | tail -8 || echo "::warning::helloworld 安装失败，跳过 ssr-plus"
+          ./scripts/feeds update helloworld 2>&1 | tail -8 || echo "::warning::helloworld 更新失败，将产出无 ssr-plus 的固件"
+          ./scripts/feeds install -a -p helloworld 2>&1 | tail -8 || echo "::warning::helloworld 安装失败，将产出无 ssr-plus 的固件"
           echo "----- helloworld 包目录 -----"
           ls package/feeds/helloworld 2>/dev/null | head -10 || echo "helloworld 未就位"
+
+      - name: 放开 1.512GHz OPP（超频档）
+        if: inputs.oc1512 != 'no'
+        run: |
+          cd openwrt
+          DTS=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-nn6000-v2.dts
+          if [ ! -f "$DTS" ]; then echo "::error::找不到 $DTS"; exit 1; fi
+          printf '\n/* 超频：放开 1.512GHz 档。原生 opp 表把该条目标为 speed-bin v1(0x2)，\n * 而 IPQ6000 的 bin 是 v2(0x4)，opp 子系统据此把它过滤掉，导致\n * scaling_available_frequencies 里只有 864/1056/1200。改为 0xf 让所有 bin\n * 都能看到这一档。散热需注意，NSS 转发不依赖 CPU 频率。 */\n&cpu_opp_table {\n\topp-1512000000 {\n\t\topp-supported-hw = <0xf>;\n\t};\n};\n' >> "$DTS"
+          echo "----- dts 尾部 -----"
+          tail -10 "$DTS"
 
       - name: 套用配置
         run: |
@@ -145,17 +160,25 @@ jobs:
           chk CONFIG_PACKAGE_kmod-qca-nss-ecm
           chk CONFIG_PACKAGE_kmod-qca-nss-drv-bridge-mgr
           echo "---------- 软件 ----------"
-          for p in luci-app-passwall luci-theme-argon luci-app-ttyd; do
+          for p in luci-theme-argon luci-app-ttyd; do
             if grep -qE "^CONFIG_PACKAGE_$p=(y|m)$" .config; then
               echo "  OK   $p"
             else
               echo "  WARN $p 未选中（不阻断）"
             fi
           done
-          if grep -qE "^CONFIG_PACKAGE_luci-app-ssr-plus=(y|m)$" .config; then
-            echo "  OK   ssr-plus 已启用"
+          echo "---------- 代理：ssr-plus 要、passwall 不要 ----------"
+          if grep -qE "^CONFIG_PACKAGE_luci-app-passwall=(y|m)$" .config; then
+            echo "  FAIL passwall 混进来了（用户明确不要）"
+            grep -E "^CONFIG_PACKAGE_luci-app-passwall" .config
+            fail=1
           else
-            echo "  WARN ssr-plus 未进入配置，将产出纯 passwall 版"
+            echo "  OK   无 passwall"
+          fi
+          if grep -qE "^CONFIG_PACKAGE_luci-app-ssr-plus=(y|m)$" .config; then
+            echo "  OK   luci-app-ssr-plus"
+          else
+            echo "  WARN ssr-plus 未进入配置（helloworld 可能没就位，产出无代理固件）"
           fi
           if [ "$fail" = "1" ]; then
             echo "::error::关键能力缺失，终止编译（避免编出没有 tun 或没有 NSS 的废固件）"
@@ -211,6 +234,7 @@ jobs:
         if: always()
         run: |
           mkdir -p reports
+          ls -la "$GITHUB_WORKSPACE/reports" 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE/reports/"*.txt reports/ 2>/dev/null || true
           cp -f "$GITHUB_WORKSPACE/nn6000-${{ matrix.variant }}.result.config" reports/ 2>/dev/null || true
           ls -la reports/ || true
