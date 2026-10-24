@@ -1,0 +1,90 @@
+name: Build NN6000 v3 (new anti-AD)
+
+# v3 = v2 的全部特性（满血 NSS / 无 WiFi / LAN 192.168.5.1 / 硬件卸载 1/1）+ 新版 anti-AD
+#
+# 与 v2 的唯一差别：
+#   - 页面换成带「时段增删表格」的新版（anti_ad.htm 3147B -> 5298B，controller 774B -> 2026B）
+#   - 补上 90-anti-ad（恢复出厂后配置文件缺失时能自建，避开 uci 不为不存在文件建档的坑）
+#   - 首启脚本改为 flow_offloading=1 + flow_offloading_hw=1（= LuCI「硬件流量卸载」）
+#
+# 实现方式：不重传整棵 files/，只放一个 v3/ 覆盖层，解包后盖在 files/ 上。
+on:
+  workflow_dispatch:
+    inputs:
+      lanip:
+        description: '默认 LAN IP'
+        default: '192.168.5.1'
+  push:
+    branches: [nn6000]
+    paths:
+      - 'v3/**'
+      - '.github/workflows/build-nn6000-v3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        oc: ['yes', 'no']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    name: nn6000-v3 / oc=${{ matrix.oc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解包 + 覆盖 + 校验
+        run: |
+          set -e
+          cat nn6000-files.b64.* | base64 -d | tar -xzf - -C .
+          cat nn6000-extra.b64.* | base64 -d | tar -xzf - -C .
+
+          echo "---- 覆盖前 anti-AD 页面大小 ----"
+          wc -c files/usr/lib/lua/luci/view/anti_ad.htm files/usr/lib/lua/luci/controller/anti_ad.lua
+
+          cp -a v3/files/. files/
+          chmod 755 files/usr/bin/anti-ad files/usr/bin/anti-ad-schedule \
+                    files/etc/uci-defaults/90-anti-ad \
+                    files/etc/uci-defaults/98-nn6000-pure \
+                    files/etc/uci-defaults/99-nn6000-antiad
+
+          echo "---- 覆盖后 ----"
+          wc -c files/usr/lib/lua/luci/view/anti_ad.htm files/usr/lib/lua/luci/controller/anti_ad.lua
+
+          # 旧版 5 条 chk 断言针对的是 bundle 里的旧页面，覆盖后必然不符 -> 停用，
+          # 改由 v3/SHA256SUMS 对新文件做完整校验（任一字节不符立即失败）
+          sed -i -E 's/^chk [0-9a-f]{64} /# chk /' ci/build.sh
+          [ "$(grep -c '^# chk ' ci/build.sh)" = "5" ] || { echo "::error::chk 断言停用失败"; exit 1; }
+          sha256sum -c v3/SHA256SUMS
+
+          echo "---- 最终 files/ ----"
+          find files -type f | sort
+          bash -n ci/build.sh
+
+      - name: 构建
+        env:
+          OCHIGH: ${{ matrix.oc }}
+          LANIP: ${{ inputs.lanip || '192.168.5.1' }}
+        run: bash ci/build.sh
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v3-pure-${{ matrix.oc == 'yes' && 'oc' || 'std' }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v3-pure-${{ matrix.oc == 'yes' && 'oc' || 'std' }}-diag
+          path: |
+            build.log
+            config-snapshot.txt
+            result.config
+          if-no-files-found: warn
+          retention-days: 15
