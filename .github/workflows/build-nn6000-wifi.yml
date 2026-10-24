@@ -1,0 +1,87 @@
+name: Build NN6000 v2 WiFi
+
+# 备胎版本：复用 pure 版已验证的 ci/build.sh，仅在 CI 内做几处 ASCII 层改写。
+# 唯一实质差别：WiFi 保留（ath11k + wpad + 板级数据 + NSS mesh 管理）。
+on:
+  workflow_dispatch:
+    inputs:
+      ochigh:
+        description: 'OC 1.32/1.44/1.512GHz (yes/no)'
+        default: 'no'
+      lanip:
+        description: 'LAN IP'
+        default: '192.168.5.1'
+  push:
+    branches: [nn6000]
+    paths:
+      - '.github/workflows/build-nn6000-wifi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    name: nn6000-v2 / wifi
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: unpack
+        run: |
+          cat nn6000-files.b64.* | base64 -d | tar -xzf - -C .
+          cat nn6000-extra.b64.* | base64 -d | tar -xzf - -C .
+          find ci configs files -type f | sort
+
+      - name: derive wifi variant
+        run: |
+          set -e
+          cp configs/nn6000-pure.config configs/nn6000-wifi.config
+          # 1) WiFi 包由 =n 翻成 =y
+          sed -i -E 's/^(CONFIG_PACKAGE_(kmod-ath|kmod-mac80211|kmod-cfg80211|ath11k|ipq-wifi|wpad|hostapd)[A-Za-z0-9_.-]*)=n$/\1=y/' configs/nn6000-wifi.config
+          sed -i 's/^CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=n/CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=y/' configs/nn6000-wifi.config
+          # wpad 三个变体互斥，只留 openssl 那个
+          sed -i 's/^CONFIG_PACKAGE_wpad-mbedtls=y/CONFIG_PACKAGE_wpad-mbedtls=n/;s/^CONFIG_PACKAGE_wpad-basic-mbedtls=y/CONFIG_PACKAGE_wpad-basic-mbedtls=n/' configs/nn6000-wifi.config
+          printf 'CONFIG_PACKAGE_iw-full=y\nCONFIG_PACKAGE_iwinfo=y\n' >> configs/nn6000-wifi.config
+          # 2) 让 build.sh 用 wifi 配置
+          sed -i 's#configs/nn6000-pure.config#configs/nn6000-wifi.config#' ci/build.sh
+          # 3) 关掉 WiFi 禁令与 WiFi 残留检查（否则必然 fail）
+          sed -i 's/^forbid() {/forbid() { return 0;/' ci/build.sh
+          sed -i 's|^for pat in ath11k\.ko.*$|for pat in __none__; do|' ci/build.sh
+          sed -i 's|^if \[ -e "\$R/etc/config/wireless" \]; then|if false; then|' ci/build.sh
+          echo "---- 配置里的 WiFi 项 ----"
+          grep -E '^CONFIG_PACKAGE_(kmod-ath|kmod-mac|ath11k|ipq-wifi|wpad|hostapd|iw)' configs/nn6000-wifi.config
+          echo "---- 脚本改写结果 ----"
+          grep -n 'nn6000-wifi.config\|forbid() {\|for pat in\|config/wireless' ci/build.sh
+          grep -q 'forbid() { return 0;' ci/build.sh || { echo '::error::forbid 改写未生效'; exit 1; }
+          grep -q 'for pat in __none__' ci/build.sh || { echo '::error::残留检查改写未生效'; exit 1; }
+          grep -q 'if false; then' ci/build.sh || { echo '::error::wireless 检查改写未生效'; exit 1; }
+          grep -q 'configs/nn6000-wifi.config' ci/build.sh || { echo '::error::配置路径未替换'; exit 1; }
+          bash -n ci/build.sh
+          echo DERIVE_OK
+
+      - name: build
+        env:
+          OCHIGH: ${{ inputs.ochigh }}
+          LANIP: ${{ inputs.lanip }}
+        run: bash ci/build.sh
+
+      - name: upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v2-wifi
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v2-wifi-diag
+          path: |
+            build.log
+            config-snapshot.txt
+            result.config
+          if-no-files-found: warn
+          retention-days: 15
