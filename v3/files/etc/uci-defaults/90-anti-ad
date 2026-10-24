@@ -1,0 +1,69 @@
+#!/bin/sh
+# ============================================================
+#  anti-AD 首次安装的默认配置
+#  只补缺失项，不覆盖任何已有设置（可安全重复执行）
+# ============================================================
+#  ⚠ 关键：本机 uci 不会为「不存在的配置文件」自动建档
+#     （uci set pkg.sec=type 直接报 "Entry not found"，
+#      随后 uci add 也报 "Entry not found"）。
+#     所以配置文件必须先存在，否则装完是 0 条时段、0 条 cron。
+#     恢复出厂后 /etc/config/anti-ad 不存在，正好踩这个坑。
+# ============================================================
+
+CFG=/etc/config/anti-ad
+
+if [ ! -s "$CFG" ]; then
+	# 全新安装：直接写默认配置（1 个总开关 + 2 条常用时段）
+	cat > "$CFG" <<'__CFG_EOF__'
+config anti-ad 'main'
+	option enabled '0'
+
+config timeslot
+	option day 'daily'
+	option start '18:30'
+	option stop '19:30'
+
+config timeslot
+	option day 'weekday'
+	option start '20:30'
+	option stop '22:30'
+__CFG_EOF__
+	echo "   已写入默认配置（总开关关闭 + 2 条时段）"
+	uci -q commit anti-ad
+else
+	# 已有配置：只补缺失项
+	if ! uci -q get anti-ad.main >/dev/null 2>&1; then
+		uci set anti-ad.main=anti-ad
+	fi
+	uci -q get anti-ad.main.enabled >/dev/null 2>&1 || uci set anti-ad.main.enabled='0'
+
+	# 没有任何时段时补两条常见默认
+	if ! uci -q show anti-ad 2>/dev/null | grep -q '=timeslot$'; then
+		uci add anti-ad timeslot >/dev/null
+		uci set anti-ad.@timeslot[-1].day='daily'
+		uci set anti-ad.@timeslot[-1].start='18:30'
+		uci set anti-ad.@timeslot[-1].stop='19:30'
+
+		uci add anti-ad timeslot >/dev/null
+		uci set anti-ad.@timeslot[-1].day='weekday'
+		uci set anti-ad.@timeslot[-1].start='20:30'
+		uci set anti-ad.@timeslot[-1].stop='22:30'
+	fi
+	uci commit anti-ad
+fi
+
+# hosts 文件必须存在：dnsmasq 在 ujail 里对它做单文件 bind mount，缺文件挂不上
+[ -f /etc/anti-ad.hosts ] || : > /etc/anti-ad.hosts
+
+# 把 hosts 挂进 dnsmasq（只需这一次 restart，之后开关都靠 SIGHUP）
+if ! uci -q get dhcp.@dnsmasq[0].addnhosts 2>/dev/null | grep -qx '/etc/anti-ad.hosts'; then
+	uci add_list dhcp.@dnsmasq[0].addnhosts='/etc/anti-ad.hosts'
+	uci commit dhcp
+	echo "   dnsmasq 未挂载 anti-ad.hosts，正在添加并重启一次 dnsmasq…"
+	/etc/init.d/dnsmasq restart
+fi
+
+# 按时段生成 crontab
+[ -x /usr/bin/anti-ad-schedule ] && /usr/bin/anti-ad-schedule apply
+
+exit 0
