@@ -1,0 +1,67 @@
+#!/bin/sh
+# ============================================================
+#  NN6000 v2 纯有线固件 —— 首启一次性配置
+#  由 /etc/init.d/boot 在 dnsmasq / network 起来之前调用
+#  只做「刷完就该是这个样子」的设定，幂等
+# ============================================================
+
+# ---------- 1. LAN 192.168.5.1/24 ----------
+uci -q set network.lan.proto='static'
+uci -q set network.lan.ipaddr='192.168.5.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q commit network
+
+# ---------- 2. 关闭 IPv6 下发（保持与现网一致） ----------
+# WAN 侧仍可拿到 v6，但 LAN 不再发 RA/DHCPv6，客户端只走 v4。
+# 想启用：把下面四行改成 1 / server / server / relay 并重启。
+uci -q set network.lan.ipv6='0'
+uci -q set dhcp.lan.dhcpv6='disabled'
+uci -q set dhcp.lan.ra='disabled'
+uci -q set dhcp.lan.ndp='disabled'
+uci -q commit dhcp
+
+# ---------- 3. NSS 硬件卸载：两个开关都开（= LuCI「硬件流量卸载」）----------
+# 2026-10-25 复核了两种配置，结论是「都能加速，但 1/1 是 NSS 官方默认」：
+#   - 0/0（原设定）：fw4 不生成 flowtable（`nft list flowtables` 里 inet fw4 为空），
+#     此时 ecm 走自己的 hook 仍能加速（10-21 实测 accelerated 18/23），这叫 ECM 纯路径。
+#   - 1/1：fw4 生成 `flowtable ft { ... flags offload }`，ecm 接管 + 内核 flowtable 兜底
+#     （实测 ecm conn 232 / conntrack 595），这也是 QCA NSS 固件的出厂默认。
+# 所以这里改成 1/1，不是为了"修一个没加速的 bug"，而是回到官方默认、多一层兜底。
+# 注：flow_offloading_hw 单独开无效，必须先有 flow_offloading 才会建表。
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+uci -q commit firewall
+
+# ---------- 4. 无线残留清零（固件里已无驱动，这里再兜一层） ----------
+[ -f /etc/config/wireless ] && rm -f /etc/config/wireless
+if [ -x /sbin/wifi ]; then
+	/sbin/wifi down >/dev/null 2>&1
+fi
+# 万一有残存 radio 段，全部标记禁用
+if uci -q show wireless >/dev/null 2>&1; then
+	uci -q set wireless.radio0.disabled='1'
+	uci -q set wireless.radio1.disabled='1'
+	uci -q set wireless.radio2.disabled='1'
+	uci -q commit wireless
+fi
+
+# ---------- 5. LuCI：Argon + 中文 ----------
+uci -q get luci.main >/dev/null 2>&1 || uci -q set luci.main=core
+uci -q set luci.main.mediaurlbase='/luci-static/argon'
+uci -q set luci.main.lang='zh_cn'
+uci -q commit luci
+
+# ---------- 6. 网页终端：走 /bin/login（不要 -f root） ----------
+if uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
+	uci -q set ttyd.@ttyd[0].command='/bin/login'
+	uci -q set ttyd.@ttyd[0].interface='lan'
+	uci -q commit ttyd
+fi
+
+# ---------- 7. 时区 / 主机名 ----------
+uci -q set system.@system[0].hostname='NN6000'
+uci -q set system.@system[0].timezone='CST-8'
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q commit system
+
+exit 0
