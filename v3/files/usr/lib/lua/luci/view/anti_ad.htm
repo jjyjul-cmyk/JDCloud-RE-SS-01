@@ -1,0 +1,170 @@
+<%+header%>
+
+<%
+local fs  = require "nixio.fs"
+local sys = require "luci.sys"
+
+local HOSTS = "/etc/anti-ad.hosts"
+local CONF  = "/etc/anti-ad.conf"
+
+local function sh(cmd)
+	local out = sys.exec(cmd .. " 2>/dev/null") or ""
+	return (out:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local size, n = 0, 0
+if fs.access(HOSTS) then
+	local s = fs.stat(HOSTS)
+	if s then size = s.size or 0 end
+	n = tonumber(sh("wc -l < " .. HOSTS)) or 0
+end
+
+local pid = sh("pidof dnsmasq")
+local rss = "-"
+local p1 = pid:match("^(%d+)")
+if p1 then
+	local v = sh("awk '/^VmRSS/{print $2}' /proc/" .. p1 .. "/status")
+	if v ~= "" then rss = v .. " kB" end
+end
+
+local on = (size > 0 and n > 0)
+local cf = fs.stat(CONF)
+local confmb = string.format("%.1f", (cf and cf.size or 0) / 1048576)
+
+local cu = require("luci.model.uci").cursor()
+cu:load("anti-ad")
+local enabled = cu:get("anti-ad", "main", "enabled") or "0"
+
+-- 收集时段
+local slots = {}
+cu:foreach("anti-ad", "timeslot", function(s)
+	slots[#slots + 1] = {
+		name  = s[".name"],
+		day   = s.day   or "daily",
+		start = s.start or "18:30",
+		stop  = s.stop  or "19:30",
+	}
+end)
+
+local action = luci.dispatcher.build_url("admin/services/anti_ad/run")
+
+-- 预览：优先用调度脚本生成的结果，老版本退回直接读 crontab
+local cronprev = ""
+if fs.access("/usr/bin/anti-ad-schedule") then
+	cronprev = sh("/usr/bin/anti-ad-schedule show")
+end
+if cronprev == "" then
+	cronprev = sh("crontab -l | grep anti-ad | grep -v '^#'")
+end
+
+local DAYS = {
+	{ "daily",   "每天" },
+	{ "weekday", "周一到周五" },
+	{ "weekend", "周六周日" },
+}
+%>
+
+<h2 name="content"><%:anti-AD 广告过滤%></h2>
+
+<div class="cbi-map">
+	<h2><%:运行状态%></h2>
+	<fieldset class="cbi-section">
+		<table class="table">
+			<tr>
+				<td width="32%" style="opacity:.65"><%:当前状态%></td>
+				<td><strong style="color:<%=on and '#2e7d32' or '#9e9e9e'%>"><%=on and '● 拦截生效中' or '○ 未生效'%></strong></td>
+			</tr>
+			<tr>
+				<td style="opacity:.65"><%:拦截规则%></td>
+				<td><%=n%> 条</td>
+			</tr>
+			<tr>
+				<td style="opacity:.65"><%:规则原档%></td>
+				<td><%=confmb%> MB</td>
+			</tr>
+			<tr>
+				<td style="opacity:.65"><%:dnsmasq%></td>
+				<td><%=pid ~= "" and ("运行中 · PID " .. pid) or "未运行"%></td>
+			</tr>
+			<tr>
+				<td style="opacity:.65"><%:dnsmasq 占用%></td>
+				<td><%=rss%></td>
+			</tr>
+		</table>
+	</fieldset>
+</div>
+
+<form method="post" action="<%=action%>">
+	<input type="hidden" name="token" value="<%=token%>" />
+
+	<div class="cbi-map">
+		<h2><%:开关%></h2>
+		<fieldset class="cbi-section">
+			<div class="cbi-value">
+				<label class="cbi-value-title" for="aden"><%:启用 anti-AD%></label>
+				<div class="cbi-value-field">
+					<input type="checkbox" id="aden" name="enabled" value="1" <%=enabled == "1" and "checked" or ""%> />
+					<div class="cbi-value-description">
+						勾选后立即开始拦截，取消勾选立即停止。计划任务按下面的时段无条件执行、不看这个开关，到下个时间点会自动接管。
+					</div>
+				</div>
+			</div>
+		</fieldset>
+	</div>
+
+	<div class="cbi-map">
+		<h2><%:定时开关时段%></h2>
+		<fieldset class="cbi-section">
+			<% if #slots == 0 then %>
+				<p style="opacity:.6"><%:还没有时段，点下面「添加时段」新建一条。%></p>
+			<% else %>
+				<table class="table">
+					<tr>
+						<th width="30%"><%:生效日%></th>
+						<th width="22%"><%:开启%></th>
+						<th width="22%"><%:关闭%></th>
+						<th width="26%"><%:操作%></th>
+					</tr>
+					<% for _, s in ipairs(slots) do %>
+					<tr>
+						<td>
+							<select name="day_<%=s.name%>" class="cbi-input-select">
+								<% for _, d in ipairs(DAYS) do %>
+									<option value="<%=d[1]%>"<%=s.day == d[1] and " selected" or ""%>><%=d[2]%></option>
+								<% end %>
+							</select>
+						</td>
+						<td><input type="time" name="start_<%=s.name%>" value="<%=s.start%>" class="cbi-input-text" style="width:7em" /></td>
+						<td><input type="time" name="stop_<%=s.name%>" value="<%=s.stop%>" class="cbi-input-text" style="width:7em" /></td>
+						<td>
+							<button type="submit" class="btn cbi-button cbi-button-remove" name="action" value="del:<%=s.name%>"><%:删除%></button>
+						</td>
+					</tr>
+					<% end %>
+				</table>
+			<% end %>
+			<p style="opacity:.6;margin-top:10px">
+				每组时段会生成「开启」和「关闭」两条计划任务，到点无条件执行。跨夜时段（关闭早于开启）暂不支持，请拆成两条。
+			</p>
+		</fieldset>
+	</div>
+
+	<div class="cbi-page-actions">
+		<button type="submit" class="btn cbi-button cbi-button-add" name="action" value="add"><%:添加时段%></button>
+		<input type="submit" class="btn cbi-button cbi-button-apply" name="action" value="save" />
+	</div>
+</form>
+
+<div class="cbi-map">
+	<h2><%:当前生效的计划任务%></h2>
+	<fieldset class="cbi-section">
+		<% if cronprev == "" then %>
+			<p style="opacity:.6"><%:没有生成任何计划任务%></p>
+		<% else %>
+			<pre style="margin:0;white-space:pre-wrap;word-break:break-all"><%=pcdata(cronprev)%></pre>
+		<% end %>
+		<p style="opacity:.6;margin-top:10px">这段内容由「定时开关时段」自动生成，直接改「系统 → 计划任务」会在下次保存时被覆盖。</p>
+	</fieldset>
+</div>
+
+<%+footer%>
