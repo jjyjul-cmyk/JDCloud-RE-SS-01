@@ -1,0 +1,45 @@
+#!/bin/sh
+# NN6000 首启：把 ZeroTier 接口纳入防火墙
+#
+# 接口名 = "zt" + 网络 ID 前 10 位（hopeful_gray 6ab565387abb1d6f -> ztklh54jiv）
+# 换 ZeroTier 网络要同步改下面的 ZT_DEV。
+#
+# 背景：fw4 的 input / forward 默认 action 是 drop。ZT 接口若不归属任何 zone，
+# 从 ZT 一侧 ping 路由器、连 22/80 全被丢弃；即使能进路由器，也转发不到 192.168.5.x。
+# fw4 渲染 iifname 时并不校验设备是否存在，所以这里写死名字是安全的：
+# 接口在 zerotier 启动后才出现，规则照样匹配。
+
+[ -f /etc/config/firewall ] || exit 0
+ZT_DEV="ztklh54jiv"
+
+if ! uci show firewall | grep -q "\.name='zt'"; then
+	uci add firewall zone >/dev/null
+	uci set firewall.@zone[-1].name='zt'
+	uci set firewall.@zone[-1].input='ACCEPT'
+	uci set firewall.@zone[-1].output='ACCEPT'
+	uci set firewall.@zone[-1].forward='ACCEPT'
+	uci set firewall.@zone[-1].masq='1'
+	uci set firewall.@zone[-1].mtu_fix='1'
+	uci add_list firewall.@zone[-1].device="$ZT_DEV"
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "src='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='zt'
+	uci set firewall.@forwarding[-1].dest='lan'
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "dest='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='lan'
+	uci set firewall.@forwarding[-1].dest='zt'
+fi
+
+uci commit firewall
+
+# 固件默认 dropbear.main.DirectInterface='lan'，SSH 只监听 br-lan，
+# ZT 侧连 22 直接被内核挡掉。清掉后监听 0.0.0.0:22。
+uci -q delete dropbear.main.DirectInterface
+uci commit dropbear
+
+exit 0
