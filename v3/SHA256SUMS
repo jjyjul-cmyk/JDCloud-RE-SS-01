@@ -1,0 +1,8 @@
+07c5da2f90c342ed3d503b6a00c43c7d4c719e8aa569f8ab714f4ba6a745e717  files/usr/bin/anti-ad
+c0c7c30962f837b2d285b8308a554e672b262734ecafa60c88434651180e02a2  files/usr/bin/anti-ad-schedule
+876c273bbe223eb1f7a962a5a52db67bd6a261aace532a144ac952229da55fa5  files/usr/lib/lua/luci/controller/anti_ad.lua
+bc331a89db4f79f5796bd40939eefbab4693ab22d66ae41e5dfe1ba1f1bab84a  files/usr/lib/lua/luci/view/anti_ad.htm
+fb16f6e8897574ec7620b1b6c32cd3386ef02e1ec780a495aaf8b2c70d5be05c  files/usr/share/rpcd/acl.d/luci-app-anti-ad.json
+c74886ba9c1dfb25f12ccd2e283b9349575a9a0a28610029c567946271298ee1  files/etc/uci-defaults/90-anti-ad
+1e5f4d312fcfac6f821f7c26d6d9509fc3df0860268304efc0aa094ec3b1b2a2  files/etc/uci-defaults/98-nn6000-pure
+80856e7936b7a1ddb821c289a8fb22be4618bdc9049528ebb8f36711c52db16c  files/etc/uci-defaults/99-nn6000-antiad
