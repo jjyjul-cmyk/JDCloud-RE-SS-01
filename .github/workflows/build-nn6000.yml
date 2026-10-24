@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       ochigh:
-        description: '超频 1.32/1.44/1.512GHz (yes/no)'
-        default: 'no'
+        description: '超频 1.32/1.44/1.512GHz (yes/no，push 触发默认 yes)'
+        default: 'yes'
       lanip:
         description: '默认 LAN IP'
         default: '192.168.5.1'
@@ -39,14 +39,14 @@ jobs:
 
       - name: 构建
         env:
-          OCHIGH: ${{ inputs.ochigh }}
+          OCHIGH: ${{ inputs.ochigh || 'yes' }}
           LANIP: ${{ inputs.lanip }}
         run: bash ci/build.sh
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: nn6000-v2-pure
+          name: nn6000-v2-pure-oc
           path: out/*
           if-no-files-found: error
           retention-days: 30
@@ -55,7 +55,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nn6000-v2-pure-diag
+          name: nn6000-v2-pure-oc-diag
           path: |
             build.log
             config-snapshot.txt
