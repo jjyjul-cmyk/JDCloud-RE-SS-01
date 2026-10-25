@@ -1,0 +1,84 @@
+#!/bin/sh
+# NN6000 首启：ZeroTier 网络 + 防火墙一站式配置
+#
+# 接口名 = "zt" + 网络 ID 前 10 位（hopeful_gray 6ab565387abb1d6f -> ztklh54jiv）
+# 换 ZeroTier 网络要同步改下面的 ZT_NET / ZT_DEV。
+#
+# 背景：fw4 的 input / forward 默认 action 是 drop。ZT 接口若不归属任何 zone，
+# 从 ZT 一侧 ping 路由器、连 22/80 全被丢弃；即使能进路由器，也转发不到 192.168.5.x。
+# fw4 渲染 iifname 时并不校验设备是否存在，所以这里写死名字是安全的：
+# 接口在 zerotier 启动后才出现，规则照样匹配。
+
+[ -f /etc/config/firewall ] || exit 0
+ZT_NET="6ab565387abb1d6f"
+ZT_DEV="ztklh54jiv"
+
+# 恢复出厂后 /etc/config/zerotier 是空的，网络 ID 也就没了。
+# 这里补默认网络（不含节点身份——secret 由 zerotier 首次启动自己生成，
+# 新节点需要去 my.zerotier.com 授权一次，这是绕不过的）。
+if [ -x /usr/sbin/zerotier-one ]; then
+	if ! uci -q get zerotier.earth.id >/dev/null 2>&1; then
+		uci set zerotier.earth=network
+		uci set zerotier.earth.id="$ZT_NET"
+		uci set zerotier.global=zerotier
+		uci set zerotier.global.enabled='1'
+		uci set zerotier.global.fw_allow_input='1'
+		uci commit zerotier
+	fi
+fi
+
+if ! uci show firewall | grep -q "\.name='zt'"; then
+	uci add firewall zone >/dev/null
+	uci set firewall.@zone[-1].name='zt'
+	uci set firewall.@zone[-1].input='ACCEPT'
+	uci set firewall.@zone[-1].output='ACCEPT'
+	uci set firewall.@zone[-1].forward='ACCEPT'
+	uci set firewall.@zone[-1].masq='1'
+	uci set firewall.@zone[-1].mtu_fix='1'
+	uci add_list firewall.@zone[-1].device="$ZT_DEV"
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "src='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='zt'
+	uci set firewall.@forwarding[-1].dest='lan'
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "dest='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='lan'
+	uci set firewall.@forwarding[-1].dest='zt'
+fi
+
+# 阻断 LAN -> ZT 的 IPv6（2026-10-25 实测事故的固化）
+#
+# ZT 给每个成员分配 6PLANE IPv6（fd6a::/18）。NAS 装了 ZT 客户端后，这个地址
+# 会通过 SMB / mDNS 发现被内网 Windows 拿到；Windows 优先 IPv6，于是拿它当
+# 共享路径访问 NAS：请求经路由器转到 zt 口，NAS 回包却按路由表从自己的 LAN 口
+# 出、源地址仍是 fd6a，客户端没有到 fd6a::/18 的回程路由 -> 直接丢。
+# 结果是 TCP 无限重传，文件拖不动，CPU 被重传包烧掉。
+#
+# 实测（IPQ6000）：单条 SMB 流 6 秒白发 125MB，累计 2.27GB 零回包；
+# zt 接口 2 小时发出 4.1GB 只收回 13KB，CPU sys 17%、idle 58%、load 1.63。
+# 拒掉后 40 秒内发送计数归零，CPU idle 97%、load 0.32。
+#
+# 内网设备走 ZT IPv6 本来就是绕远路，直接 REJECT 强制回落到 IPv4 / LAN IPv6。
+# 从 ZT 一侧访问内网（zt -> lan）不受影响。
+if ! uci -q show firewall.nolan2zt6 >/dev/null 2>&1; then
+	uci set firewall.nolan2zt6=rule
+	uci set firewall.nolan2zt6.name='Block-LAN-to-ZT-IPv6'
+	uci set firewall.nolan2zt6.src='lan'
+	uci set firewall.nolan2zt6.dest='zt'
+	uci set firewall.nolan2zt6.family='ipv6'
+	uci set firewall.nolan2zt6.proto='all'
+	uci set firewall.nolan2zt6.target='REJECT'
+fi
+
+uci commit firewall
+
+# 固件默认 dropbear.main.DirectInterface='lan'，SSH 只监听 br-lan，
+# ZT 侧连 22 直接被内核挡掉。清掉后监听 0.0.0.0:22。
+uci -q delete dropbear.main.DirectInterface
+uci commit dropbear
+
+exit 0
