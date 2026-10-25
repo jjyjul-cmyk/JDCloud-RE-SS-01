@@ -1,0 +1,130 @@
+#!/bin/sh
+# NN6000 首启：ZeroTier 网络 + 防火墙一站式配置
+#
+# 接口名 = "zt" + 网络 ID 前 10 位（hopeful_gray 6ab565387abb1d6f -> ztklh54jiv）
+# 换 ZeroTier 网络要同步改下面的 ZT_NET / ZT_DEV。
+#
+# 背景：fw4 的 input / forward 默认 action 是 drop。ZT 接口若不归属任何 zone，
+# 从 ZT 一侧 ping 路由器、连 22/80 全被丢弃；即使能进路由器，也转发不到 192.168.5.x。
+# fw4 渲染 iifname 时并不校验设备是否存在，所以这里写死名字是安全的：
+# 接口在 zerotier 启动后才出现，规则照样匹配。
+
+[ -f /etc/config/firewall ] || exit 0
+ZT_NET="6ab565387abb1d6f"
+ZT_DEV="ztklh54jiv"
+
+# 恢复出厂后，/etc/config/zerotier 会回到包自带的默认内容：
+#     config network 'earth'
+#         option enabled '0'
+#         option id '8056c2e21c000001'    <- ZeroTier 官方 Earth 测试网络
+# 所以「判断 id 是否存在」是错的——它存在，只是值不对，脚本会被直接跳过，
+# 结果恢复出厂后根本不 join 我们的网络（v5 的 bug，2026-10-25 实测确认）。
+# 改成「值比较」，并且顺手把 enabled 置 1（默认是 0，禁用的）。
+#
+# 另外 uci 对不存在的配置文件会报 "Entry not found" 且不落盘，
+# 先 touch 一下保证文件在（正常固件里由包提供，这里只是兜底）。
+if [ -x /usr/sbin/zerotier-one ]; then
+	[ -f /etc/config/zerotier ] || : > /etc/config/zerotier
+	uci -q get zerotier.global >/dev/null 2>&1 || uci set zerotier.global=zerotier
+	uci set zerotier.global.enabled='1'
+	uci set zerotier.global.fw_allow_input='1'
+	uci -q get zerotier.earth >/dev/null 2>&1 || uci set zerotier.earth=network
+	if [ "$(uci -q get zerotier.earth.id)" != "$ZT_NET" ]; then
+		uci set zerotier.earth.id="$ZT_NET"
+	fi
+	uci set zerotier.earth.enabled='1'
+	uci commit zerotier
+fi
+
+if ! uci show firewall | grep -q "\.name='zt'"; then
+	uci add firewall zone >/dev/null
+	uci set firewall.@zone[-1].name='zt'
+	uci set firewall.@zone[-1].input='ACCEPT'
+	uci set firewall.@zone[-1].output='ACCEPT'
+	uci set firewall.@zone[-1].forward='ACCEPT'
+	uci set firewall.@zone[-1].masq='1'
+	uci set firewall.@zone[-1].mtu_fix='1'
+	uci add_list firewall.@zone[-1].device="$ZT_DEV"
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "src='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='zt'
+	uci set firewall.@forwarding[-1].dest='lan'
+fi
+
+if ! uci -q show firewall.@forwarding 2>/dev/null | grep -q "dest='zt'"; then
+	uci add firewall forwarding >/dev/null
+	uci set firewall.@forwarding[-1].src='lan'
+	uci set firewall.@forwarding[-1].dest='zt'
+fi
+
+# 阻断 LAN -> ZT 的 IPv6（2026-10-25 实测事故的固化）
+#
+# ZT 给每个成员分配 6PLANE IPv6（fd6a::/18）。NAS 装了 ZT 客户端后，这个地址
+# 会通过 SMB / mDNS 发现被内网 Windows 拿到；Windows 优先 IPv6，于是拿它当
+# 共享路径访问 NAS：请求经路由器转到 zt 口，NAS 回包却按路由表从自己的 LAN 口
+# 出、源地址仍是 fd6a，客户端没有到 fd6a::/18 的回程路由 -> 直接丢。
+# 结果是 TCP 无限重传，文件拖不动，CPU 被重传包烧掉。
+#
+# 实测（IPQ6000）：单条 SMB 流 6 秒白发 125MB，累计 2.27GB 零回包；
+# zt 接口 2 小时发出 4.1GB 只收回 13KB，CPU sys 17%、idle 58%、load 1.63。
+# 拒掉后 40 秒内发送计数归零，CPU idle 97%、load 0.32。
+#
+# 内网设备走 ZT IPv6 本来就是绕远路，直接 REJECT 强制回落到 IPv4 / LAN IPv6。
+# 从 ZT 一侧访问内网（zt -> lan）不受影响。
+if ! uci -q show firewall.nolan2zt6 >/dev/null 2>&1; then
+	uci set firewall.nolan2zt6=rule
+	uci set firewall.nolan2zt6.name='Block-LAN-to-ZT-IPv6'
+	uci set firewall.nolan2zt6.src='lan'
+	uci set firewall.nolan2zt6.dest='zt'
+	uci set firewall.nolan2zt6.family='ipv6'
+	uci set firewall.nolan2zt6.proto='all'
+	uci set firewall.nolan2zt6.target='REJECT'
+fi
+
+uci commit firewall
+
+# 固件默认 dropbear.main.DirectInterface='lan'，SSH 只监听 br-lan，
+# ZT 侧连 22 直接被内核挡掉。清掉后监听 0.0.0.0:22。
+uci -q delete dropbear.main.DirectInterface
+uci commit dropbear
+
+# ---- 让内网 / ZT 两个网段始终查 main 表 ----
+#
+# Open-Box 启用全局 tun 时，sing-box 会往表 2022 里塞：
+#     192.168.5.0/24    via <tun>
+#     192.168.192.0/24  via <tun>
+# 而 sing-box 的策略规则优先级高于 main，于是 ZT <-> LAN 的转发会被导进 tun，
+# 隧道里没人应答，转发直接断（老问题，之前靠手工 ip rule 兜着）。
+#
+# 这里把守卫脚本落地，并在 rc.local 里挂一行开机执行。
+# 之所以不用「直接往 rc.local 写一堆行」：rc.local 末尾有 exit 0，
+# 追加会失效，改一处只需一个文件更不容易被后续操作踩坏。
+cat > /etc/nn6000-zt-guard.sh <<'GUARD'
+#!/bin/sh
+# nn6000-zt-guard: 内网 / ZT 网段强制走 main 表，避免被 Open-Box 的 tun 抢走。
+# 幂等：重复 add 会返回 File exists，直接吞掉。
+for n in 192.168.5.0/24 192.168.192.0/24; do
+	ip rule add to "$n" lookup main pref 100 2>/dev/null
+done
+GUARD
+chmod 755 /etc/nn6000-zt-guard.sh
+
+# 挂进 rc.local：插在 exit 0 之前；没有 exit 0 就追加到末尾
+if ! grep -q 'nn6000-zt-guard.sh' /etc/rc.local 2>/dev/null; then
+	if [ ! -f /etc/rc.local ]; then
+		printf '#!/bin/sh\n\nexit 0\n' > /etc/rc.local
+	fi
+	if grep -q '^exit 0' /etc/rc.local; then
+		sed -i 's|^exit 0|/etc/nn6000-zt-guard.sh\nexit 0|' /etc/rc.local
+	else
+		printf '\n/etc/nn6000-zt-guard.sh\n' >> /etc/rc.local
+	fi
+	chmod 755 /etc/rc.local
+fi
+
+# 本次开机也立刻生效（rc.local 是下次开机才跑到）
+/etc/nn6000-zt-guard.sh
+
+exit 0
