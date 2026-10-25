@@ -1,14 +1,15 @@
-name: Build NN6000 v4 (新 anti-AD + ZeroTier, 超频)
+name: Build NN6000 v4.1 (新 anti-AD + ZeroTier, 超频)
 
-# v4 = v3 的全部内容（NSS 满血 / LAN 192.168.5.1 / 硬件流量卸载 1/1 / 新 anti-AD 页面）
-#      + ZeroTier 首启防火墙配置（zt zone + zt<->lan 转发 + 解掉 dropbear 的 br-lan 绑定）
-#      + 两路产物：纯有线 / 带 WiFi，都固定超频 1.32/1.44/1.512GHz
+# v4.1 = v4 的全部内容（NSS 满血 / LAN 192.168.5.1 / 硬件流量卸载 1/1 / 新 anti-AD 页面
+#        / zt zone + zt<->lan 转发 + 解掉 dropbear 的 br-lan 绑定）
+#        + 阻断 LAN -> ZT 的 IPv6（修 2026-10-25 实测的 SMB 无限重传事故）
+#        + 两路产物：纯有线 / 带 WiFi，都固定超频 1.32/1.44/1.512GHz
 #
 # Open-Box 不编进固件，刷完机自己装。
 #
 # 产物：
-#   nn6000-v4-pure-oc   无 WiFi  + 超频
-#   nn6000-v4-wifi-oc   带 WiFi  + 超频
+#   nn6000-v4.1-pure-oc   无 WiFi  + 超频
+#   nn6000-v4.1-wifi-oc   带 WiFi  + 超频
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +33,7 @@ jobs:
         variant: [pure, wifi]
     runs-on: ubuntu-24.04
     timeout-minutes: 350
-    name: nn6000-v4-${{ matrix.variant }}-oc
+    name: nn6000-v4.1-${{ matrix.variant }}-oc
     steps:
       - uses: actions/checkout@v4
 
@@ -64,9 +65,14 @@ jobs:
           [ "$(grep -c '^# chk ' ci/build.sh)" = "5" ] || { echo '::error::chk 断言停用失败'; exit 1; }
 
           sha256sum -c v3/SHA256SUMS
-          echo "c413092948cc256641c9cb0476357ad8134d836c9c55ed19c6d5b925c264cf2f  files/etc/uci-defaults/97-nn6000-zt" | sha256sum -c -
+          echo "58f93c2c471c7d73291c2b76002a3dbea03881407cb3908713831d6783ff0676  files/etc/uci-defaults/97-nn6000-zt" | sha256sum -c -
           test -x files/etc/uci-defaults/97-nn6000-zt || { echo '::error::97-nn6000-zt 没有执行位'; exit 1; }
           grep -q 'ztklh54jiv' files/etc/uci-defaults/97-nn6000-zt || { echo '::error::97 内容不对'; exit 1; }
+          # v4.1 新增：LAN -> ZT 的 IPv6 阻断必须在内
+          grep -q 'nolan2zt6' files/etc/uci-defaults/97-nn6000-zt \
+            || { echo '::error::97 里缺少 LAN->ZT IPv6 阻断规则'; exit 1; }
+          grep -q 'Block-LAN-to-ZT-IPv6' files/etc/uci-defaults/97-nn6000-zt \
+            || { echo '::error::阻断规则名称不对'; exit 1; }
 
           bash -n ci/build.sh
           echo "---- 最终 files/ ----"
@@ -117,6 +123,8 @@ jobs:
           test -s "$R/etc/uci-defaults/97-nn6000-zt" || { echo '::error::ZT 首启脚本没进固件'; exit 1; }
           test -x "$R/etc/uci-defaults/97-nn6000-zt" || { echo '::error::ZT 首启脚本丢了执行位'; exit 1; }
           grep -q 'ztklh54jiv' "$R/etc/uci-defaults/97-nn6000-zt" || { echo '::error::ZT 首启脚本内容不对'; exit 1; }
+          grep -q 'nolan2zt6' "$R/etc/uci-defaults/97-nn6000-zt" \
+            || { echo '::error::固件里缺少 LAN->ZT IPv6 阻断规则'; exit 1; }
           # 纯有线版必须没有 WiFi 残留（build.sh 已检查，这里再兜一层）
           if [ "${{ matrix.variant }}" = "pure" ]; then
             for pat in ath11k.ko mac80211.ko cfg80211.ko wpad hostapd; do
@@ -135,7 +143,7 @@ jobs:
           ls -lh
           for f in *sysupgrade.bin; do
             [ -e "$f" ] || continue
-            mv "$f" "nn6000-v4-${{ matrix.variant }}-oc-sysupgrade.bin"
+            mv "$f" "nn6000-v4.1-${{ matrix.variant }}-oc-sysupgrade.bin"
           done
           sha256sum *sysupgrade.bin > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -144,7 +152,7 @@ jobs:
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: nn6000-v4-${{ matrix.variant }}-oc
+          name: nn6000-v4.1-${{ matrix.variant }}-oc
           path: out/*
           if-no-files-found: error
           retention-days: 30
@@ -153,7 +161,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nn6000-v4-${{ matrix.variant }}-oc-diag
+          name: nn6000-v4.1-${{ matrix.variant }}-oc-diag
           path: |
             build.log
             config-snapshot.txt
