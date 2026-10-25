@@ -1,0 +1,27 @@
+#!/bin/sh
+# NN6000: 恢复出厂后 CPU 默认锁在原生 1.2GHz（schedutil 在 864~1200MHz 之间自动升降）。
+#
+# 超频档位 1.32 / 1.44 / 1.512GHz 由 DTS 放开（opp-supported-hw = <0xf>），
+# 档位一直保留，随时可以打开，两种办法：
+#   1) LuCI -> 系统 -> CPU 频率，把「最大频率」选到目标档
+#   2) uci set cpufreq.cpufreq.maxfreq0='1440000'
+#      uci commit cpufreq && /etc/init.d/cpufreq restart
+#
+# 作用范围：只在「不保留配置」刷机时写入这份默认值；
+# 保留配置刷机时 /etc/config/cpufreq 已存在，沿用用户原有设置。
+
+[ -f /etc/config/cpufreq ] || : > /etc/config/cpufreq
+
+cat > /etc/config/cpufreq <<'CFGEOF'
+config settings 'cpufreq'
+	option governor0 'schedutil'
+	option minfreq0 '864000'
+	option maxfreq0 '1200000'
+
+config settings 'global'
+	option set '1'
+CFGEOF
+
+/etc/init.d/cpufreq restart 2>/dev/null || true
+
+exit 0
