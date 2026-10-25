@@ -1,0 +1,214 @@
+name: Build NN6000 v5 (一步到位版, 超频)
+
+# v5 = v4.1 的全部内容
+#      （NSS 满血 / LAN 192.168.5.1 / 硬件流量卸载 1/1 / 新 anti-AD 页面
+#       / zt zone + zt<->lan 转发 + 解掉 dropbear 的 br-lan 绑定
+#       / 阻断 LAN -> ZT 的 IPv6）
+#      + 内网访问飞牛 ZT 地址时自动劫持回内网直连（hairpin，修 SMB 绕远路）
+#      + 软件源已注释掉镜像缺失的三个 feed（apk update 不再报 error 8）
+#      + ZeroTier 网络 ID 默认内置（恢复出厂也会自动 join，只需去控制台授权）
+#      + 两路产物：纯有线 / 带 WiFi，都固定超频 1.32/1.44/1.512GHz
+#
+# Open-Box 不编进固件，刷完机自己装。
+#
+# 产物：
+#   nn6000-v5-pure-oc   无 WiFi  + 超频
+#   nn6000-v5-wifi-oc   带 WiFi  + 超频
+on:
+  workflow_dispatch:
+    inputs:
+      lanip:
+        description: '默认 LAN IP'
+        default: '192.168.5.1'
+  push:
+    branches: [nn6000]
+    paths:
+      - 'v5/**'
+      - '.github/workflows/build-nn6000-v5.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [pure, wifi]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    name: nn6000-v5-${{ matrix.variant }}-oc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解包 + 覆盖 + 校验
+        run: |
+          set -e
+          cat nn6000-files.b64.* | base64 -d | tar -xzf - -C .
+          cat nn6000-extra.b64.* | base64 -d | tar -xzf - -C .
+
+          echo "---- 覆盖前 ----"
+          wc -c files/usr/lib/lua/luci/view/anti_ad.htm files/usr/lib/lua/luci/controller/anti_ad.lua
+          ls files/etc/nftables.d/ 2>/dev/null || echo "(bundle 里没有 nftables.d)"
+
+          cp -a v3/files/. files/
+          cp -a v4/files/. files/
+          cp -a v5/files/. files/
+          chmod 755 files/etc/uci-defaults/*
+
+          echo "---- 覆盖后 ----"
+          wc -c files/usr/lib/lua/luci/view/anti_ad.htm files/usr/lib/lua/luci/controller/anti_ad.lua
+          ls -l files/etc/nftables.d/
+
+          # 关键：ci/build.sh 第 0 步自己还会解包一次，会把 files/ 盖回旧版，
+          # 新页面就白做了（上一轮 40143837277 正是栽在这里）。换成再覆盖一遍。
+          sed -i 's#^tar -xzf /tmp/nn-files.tgz -C \.$#cp -a v3/files/. files/; cp -a v4/files/. files/; cp -a v5/files/. files/; chmod 755 files/etc/uci-defaults/*#' ci/build.sh
+          grep -q 'cp -a v5/files/. files/' ci/build.sh \
+            || { echo '::error::build.sh 内部解包未替换'; exit 1; }
+
+          # 旧 chk 断言针对 bundle 里的旧页面，覆盖后必然不符 -> 停用，
+          # 改由 v3/SHA256SUMS + 下面逐个文件校验兜底
+          sed -i -E 's/^chk [0-9a-f]{64} /# chk /' ci/build.sh
+          [ "$(grep -c '^# chk ' ci/build.sh)" = "5" ] || { echo '::error::chk 断言停用失败'; exit 1; }
+
+          sha256sum -c v3/SHA256SUMS
+
+          # --- v5 三个新文件按 sha256 逐个校验（确认覆盖真的生效）---
+          printf '%s\n' \
+            'ea4a53f2fd2e8577f2245e44c248cdaceab6a0d069613efc4589f268591cdb58  files/etc/uci-defaults/97-nn6000-zt' \
+            '452b79263ce540ee8dab22ed1f2603ee40710f63d07a580bbfb255b634a8ca87  files/etc/nftables.d/95-lan-nas-hairpin.nft' \
+            '43d0dffed91a679a26f155f3b6b1b81b224d636efa9b23a0e6059099cc08b7c6  files/etc/apk/repositories.d/distfeeds.list' \
+            | sha256sum -c -
+
+          # 97 脚本：ZT 网络 ID + zt zone + IPv6 阻断 都要在
+          test -x files/etc/uci-defaults/97-nn6000-zt || { echo '::error::97 没有执行位'; exit 1; }
+          for pat in 'ztklh54jiv' 'nolan2zt6' 'Block-LAN-to-ZT-IPv6' "6ab565387abb1d6f" 'zerotier.earth'; do
+            grep -q "$pat" files/etc/uci-defaults/97-nn6000-zt \
+              || { echo "::error::97 里缺少：$pat"; exit 1; }
+          done
+
+          # hairpin 规则：目标地址与劫持目标都要在
+          test -s files/etc/nftables.d/95-lan-nas-hairpin.nft \
+            || { echo '::error::hairpin 规则文件缺失'; exit 1; }
+          for pat in '192.168.192.64' '192.168.5.50' 'lan_nas_hairpin_snat' '0x514e'; do
+            grep -q "$pat" files/etc/nftables.d/95-lan-nas-hairpin.nft \
+              || { echo "::error::hairpin 规则缺少：$pat"; exit 1; }
+          done
+
+          # 软件源：三个坏 feed 必须是注释状态
+          n=$(grep -c '^# https://mirrors.vsean.net' files/etc/apk/repositories.d/distfeeds.list || true)
+          [ "$n" = "3" ] || { echo "::error::软件源注释数不对（$n != 3）"; exit 1; }
+          grep -q 'nss_packages' files/etc/apk/repositories.d/distfeeds.list || { echo '::error::源列表异常'; exit 1; }
+          a=$(grep -c '^https://' files/etc/apk/repositories.d/distfeeds.list || true)
+          [ "$a" = "6" ] || { echo "::error::有效源数量不对（$a != 6）"; exit 1; }
+
+          bash -n ci/build.sh
+          echo "---- 最终 files/ ----"
+          find files -type f | sort
+
+      - name: 派生 WiFi 变体
+        if: matrix.variant == 'wifi'
+        run: |
+          set -e
+          cp configs/nn6000-pure.config configs/nn6000-wifi.config
+          # 1) WiFi 相关包 =n -> =y
+          sed -i -E 's/^(CONFIG_PACKAGE_(kmod-ath|kmod-mac80211|kmod-cfg80211|ath11k|ipq-wifi|wpad|hostapd)[A-Za-z0-9_.-]*)=n$/\1=y/' configs/nn6000-wifi.config
+          sed -i 's/^CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=n/CONFIG_PACKAGE_kmod-qca-nss-drv-wifi-meshmgr=y/' configs/nn6000-wifi.config
+          # wpad 三个变体互斥，只留 openssl
+          sed -i 's/^CONFIG_PACKAGE_wpad-mbedtls=y/CONFIG_PACKAGE_wpad-mbedtls=n/;s/^CONFIG_PACKAGE_wpad-basic-mbedtls=y/CONFIG_PACKAGE_wpad-basic-mbedtls=n/' configs/nn6000-wifi.config
+          printf 'CONFIG_PACKAGE_iw-full=y\nCONFIG_PACKAGE_iwinfo=y\n' >> configs/nn6000-wifi.config
+          # 2) 让 build.sh 读 wifi 配置
+          sed -i 's#configs/nn6000-pure.config#configs/nn6000-wifi.config#' ci/build.sh
+          # 3) 关掉“无 WiFi”禁令与残留检查，否则必然 fail
+          sed -i 's/^forbid() {/forbid() { return 0;/' ci/build.sh
+          sed -i 's|^for pat in ath11k\.ko.*$|for pat in __none__; do|' ci/build.sh
+          sed -i 's|^if \[ -e "\$R/etc/config/wireless" \]; then|if false; then|' ci/build.sh
+
+          grep -E '^CONFIG_PACKAGE_(kmod-ath|kmod-mac|ath11k|ipq-wifi|wpad|hostapd|iw)' configs/nn6000-wifi.config
+          grep -q 'forbid() { return 0;' ci/build.sh || { echo '::error::forbid 改写未生效'; exit 1; }
+          grep -q 'for pat in __none__' ci/build.sh || { echo '::error::残留检查改写未生效'; exit 1; }
+          grep -q 'if false; then' ci/build.sh || { echo '::error::wireless 检查改写未生效'; exit 1; }
+          grep -q 'configs/nn6000-wifi.config' ci/build.sh || { echo '::error::配置路径未替换'; exit 1; }
+          bash -n ci/build.sh
+          echo DERIVE_OK
+
+      - name: 构建（约 100 分钟）
+        env:
+          OCHIGH: 'yes'
+          LANIP: ${{ inputs.lanip || '192.168.5.1' }}
+        run: bash ci/build.sh
+
+      - name: 校验固件内容
+        run: |
+          set -e
+          R=$(ls -d openwrt/build_dir/target-*/root-* | head -1)
+          echo "rootfs: $R"
+
+          # anti-AD 新版页面
+          wc -c "$R/usr/lib/lua/luci/view/anti_ad.htm"
+          grep -q 'anti-ad-schedule show' "$R/usr/lib/lua/luci/view/anti_ad.htm" \
+            || { echo '::error::新 anti-AD 页面没进固件（还是旧版）'; exit 1; }
+          grep -q 'del:' "$R/usr/lib/lua/luci/controller/anti_ad.lua" \
+            || { echo '::error::新版 controller 没进固件'; exit 1; }
+
+          # ZeroTier 首启脚本
+          test -x "$R/etc/uci-defaults/97-nn6000-zt" || { echo '::error::97 丢了执行位'; exit 1; }
+          for pat in 'ztklh54jiv' 'nolan2zt6' "6ab565387abb1d6f"; do
+            grep -q "$pat" "$R/etc/uci-defaults/97-nn6000-zt" \
+              || { echo "::error::固件里的 97 缺少：$pat"; exit 1; }
+          done
+
+          # hairpin 规则必须进 rootfs（fw4 会自动 include）
+          test -s "$R/etc/nftables.d/95-lan-nas-hairpin.nft" \
+            || { echo '::error::hairpin 规则没进固件'; exit 1; }
+          grep -q '192.168.5.50' "$R/etc/nftables.d/95-lan-nas-hairpin.nft" \
+            || { echo '::error::hairpin 规则内容不对'; exit 1; }
+
+          # 软件源
+          n=$(grep -c '^# https://mirrors.vsean.net' "$R/etc/apk/repositories.d/distfeeds.list" || true)
+          [ "$n" = "3" ] || { echo "::error::固件里软件源注释数不对（$n）"; exit 1; }
+          echo "软件源：6 个有效 + 3 个已注释"
+
+          # 纯有线版必须没有 WiFi 残留
+          if [ "${{ matrix.variant }}" = "pure" ]; then
+            for pat in ath11k.ko mac80211.ko cfg80211.ko wpad hostapd; do
+              if find "$R" -name "*${pat}*" | grep -q .; then
+                echo "::error::pure 版有 WiFi 残留：$pat"; exit 1
+              fi
+            done
+            [ ! -e "$R/etc/config/wireless" ] || { echo '::error::pure 版有 wireless 配置'; exit 1; }
+          fi
+          echo CONTENT_OK
+
+      - name: 标注产物名
+        run: |
+          set -e
+          cd out
+          ls -lh
+          for f in *sysupgrade.bin; do
+            [ -e "$f" ] || continue
+            mv "$f" "nn6000-v5-${{ matrix.variant }}-oc-sysupgrade.bin"
+          done
+          sha256sum *sysupgrade.bin > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          ls -lh
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v5-${{ matrix.variant }}-oc
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn6000-v5-${{ matrix.variant }}-oc-diag
+          path: |
+            build.log
+            config-snapshot.txt
+            result.config
+          if-no-files-found: warn
+          retention-days: 15
