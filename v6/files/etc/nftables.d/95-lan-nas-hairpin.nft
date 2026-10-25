@@ -1,0 +1,27 @@
+# 内网设备用飞牛的 ZeroTier 地址（192.168.192.64）访问 SMB 时，
+# 劫持回内网直连 192.168.5.50，避免数据绕路由器一圈再被 ZT 加密。
+#
+# 飞牛同时是 192.168.5.50 和 192.168.192.64（同一台机器）。
+# Windows 通过 SMB / mDNS 发现拿到 ZT 地址后会优先用它，于是走
+#   204 -> 路由器 -> zt 隧道加密 -> 又发回同一台交换机给飞牛
+# 实测（2026-10-25）：zt 出口峰值 125Mbps（内网直连千兆），CPU sys 43%，
+# 单条 SMB 流累计 1.46GB、回包 1.22GB，全部绕了无谓的一圈。
+#
+# 只劫持「LAN 源 + 目标为飞牛 ZT 地址 + 445 端口」，从外部 ZT 访问
+# 飞牛（源地址不是 192.168.5.0/24）完全不受影响。
+#
+# 换成别的设备时改 IP 即可；换机明就删掉本文件或改 saddr/daddr。
+# 说明：DNAT 与源地址同网段（hairpin）必须配 masquerade，
+# 否则飞牛回包会直接二层发给客户端、绕过 conntrack，连接建立不起来。
+# 用 ct mark 标记，保证 masquerade 只作用于被劫持的连接，
+# 不影响内网其它正常访问飞牛的流量。
+
+chain lan_nas_hairpin_dnat {
+	type nat hook prerouting priority dstnat - 10; policy accept;
+	ip saddr 192.168.5.0/24 ip daddr 192.168.192.64 tcp dport 445 ct mark set 0x514e counter dnat ip to 192.168.5.50
+}
+
+chain lan_nas_hairpin_snat {
+	type nat hook postrouting priority srcnat - 10; policy accept;
+	ct mark 0x514e masquerade
+}
