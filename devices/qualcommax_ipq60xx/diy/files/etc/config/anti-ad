@@ -1,0 +1,14 @@
+
+config anti-ad 'main'
+	option enabled '0'
+
+config timeslot
+	option day 'daily'
+	option start '18:30'
+	option stop '19:30'
+
+config timeslot
+	option day 'weekday'
+	option start '20:30'
+	option stop '22:30'
+

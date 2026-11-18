@@ -1,0 +1,173 @@
+#!/bin/sh
+# ============================================================
+#  anti-AD 广告过滤开关（零中断版 v2）
+#  ------------------------------------------------------------
+#  原理：
+#    anti-AD 官方规则是 dnsmasq 的 address=/域名/ 格式，这种
+#    形式放在 conf-dir 里，dnsmasq 只在【启动时】读一次，
+#    所以必须 restart 才能生效 —— 而 restart 会清 DNS 缓存，
+#    连带把 Open-Box 的 fake-ip 映射搞挂（实测 sing-box 会退出）。
+#
+#    本版改成 hosts 格式 + uci 的 addnhosts：
+#      /etc/anti-ad.hosts  里是 "0.0.0.0 域名" 10 万条；
+#      dnsmasq 通过 addn-hosts 读取它，而 hosts 文件在收到
+#      SIGHUP 时会被【重新读取】（实测 PID 不变）。
+#    所以开关只发 SIGHUP，进程不重启、DNS 不断、缓存不丢，
+#    Open-Box 完全无感。
+#
+#  额外好处：
+#    hosts 返回 0.0.0.0 而不是 NXDOMAIN，App 立刻拿到不可达地址，
+#    不会像 NXDOMAIN 那样傻等超时。
+#
+#  用法：
+#    anti-ad on      开启（规则超 7 天会自动重下）
+#    anti-ad off     关闭
+#    anti-ad status  查看状态
+#    anti-ad check   自检（配置/文件/进程/解析链路）
+# ============================================================
+
+LIST=/etc/anti-ad.conf          # 原始 dnsmasq 格式（下载档，离线兜底用）
+HOSTS=/etc/anti-ad.hosts        # 转换后的 hosts 格式（dnsmasq 实际读取）
+URL="https://anti-ad.net/anti-ad-for-dnsmasq.conf"
+MAX_AGE=604800                  # 7 天
+
+# 发 SIGHUP 让 dnsmasq 重读 addn-hosts；并检测它有没有被意外重启
+reload_dns() {
+	P0=$(pidof dnsmasq 2>/dev/null)
+	if [ -z "$P0" ]; then
+		logger -t anti-ad "dnsmasq 没在运行，放弃"
+		return 1
+	fi
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1
+	sleep 2
+	P1=$(pidof dnsmasq 2>/dev/null)
+	if [ "$P0" != "$P1" ]; then
+		logger -t anti-ad "警告：dnsmasq 被重启了（$P0 -> $P1），Open-Box 可能需要拉一把"
+		echo "警告：dnsmasq 被重启（PID $P0 -> $P1）"
+	fi
+	return 0
+}
+
+# 需要时下载规则，然后统一转成 hosts 格式
+refresh() {
+	need=0
+	if [ -s "$LIST" ]; then
+		mt=$(date -r "$LIST" +%s 2>/dev/null || echo 0)
+		now=$(date +%s)
+		[ "$mt" -gt 0 ] && [ $((now - mt)) -ge $MAX_AGE ] && need=1
+	else
+		need=1
+	fi
+
+	if [ "$need" = "1" ]; then
+		tmp=/tmp/anti-ad.dl
+		rm -f "$tmp"
+		if curl -fsSL --max-time 180 "$URL" -o "$tmp" 2>/dev/null && grep -q '^address=/' "$tmp"; then
+			mv -f "$tmp" "$LIST"
+			logger -t anti-ad "规则已更新：$(wc -l < "$LIST") 行"
+		else
+			rm -f "$tmp"
+			if [ -s "$LIST" ]; then
+				logger -t anti-ad "下载失败，沿用本地旧规则"
+			else
+				logger -t anti-ad "下载失败且无本地规则"
+				return 1
+			fi
+		fi
+	fi
+
+	# address=/域名/  ->  0.0.0.0 域名
+	sed -n 's|^address=/\([^/]*\)/$|0.0.0.0 \1|p' "$LIST" > "$HOSTS.tmp" 2>/dev/null
+	if [ ! -s "$HOSTS.tmp" ]; then
+		rm -f "$HOSTS.tmp"
+		logger -t anti-ad "规则转换结果为空，放弃"
+		return 1
+	fi
+	# ⚠ 关键：必须【原地覆盖】写入，绝不能用 mv / rm+新建 替换这个文件！
+	#   dnsmasq 跑在 ujail 里，jail 对 /etc/anti-ad.hosts 做了单文件 bind mount。
+	#   一旦 inode 被换掉，jail 里就指向 "已删除" 的旧 inode
+	#   （/proc/<dnsmasq pid>/mountinfo 显示 .../anti-ad.hosts//deleted），
+	#   结果是 dnsmasq 永远读到旧内容，规则完全不生效（实测踩过）。
+	#   cat 重定向覆盖只改内容、不改 inode，jail 始终看得见。
+	cat "$HOSTS.tmp" > "$HOSTS"
+	rm -f "$HOSTS.tmp"
+	return 0
+}
+
+# 检查 uci 里有没有挂 addnhosts（没挂的话 SIGHUP 不会读这个文件）
+uci_ready() {
+	uci -q get dhcp.@dnsmasq[0].addnhosts 2>/dev/null | grep -qx "$HOSTS"
+}
+
+case "$1" in
+on)
+	if ! uci_ready; then
+		echo "❌ 还没初始化：uci 里没有 addnhosts=$HOSTS"
+		echo "   请先执行一次：sh /root/deploy_ad.sh（只需一次，会重启一次 dnsmasq）"
+		exit 1
+	fi
+	if ! refresh; then
+		echo "❌ 规则准备失败"
+		exit 1
+	fi
+	N=$(wc -l < "$HOSTS")
+	reload_dns
+	logger -t anti-ad "广告过滤已开启：$N 条 -> $HOSTS（SIGHUP，未重启进程）"
+	echo "✅ 已开启，$N 条规则（dnsmasq PID $(pidof dnsmasq)，未重启）"
+	;;
+off)
+	: > "$HOSTS"     # 清空但保留文件，dnsmasq 重读得到 0 条
+	reload_dns
+	logger -t anti-ad "广告过滤已关闭（SIGHUP，未重启进程）"
+	echo "✅ 已关闭（dnsmasq PID $(pidof dnsmasq)，未重启）"
+	;;
+status)
+	N=0
+	[ -s "$HOSTS" ] && N=$(wc -l < "$HOSTS")
+	echo "规则原档   : $LIST $( [ -s "$LIST" ] && echo "（$(wc -l < "$LIST") 行 / $(date -r "$LIST" '+%m-%d %H:%M')）" || echo "（缺失）" )"
+	echo "hosts 文件 : $HOSTS（$N 条）"
+	if uci_ready; then
+		echo "uci 挂载   : ✅ addnhosts 已配置"
+	else
+		echo "uci 挂载   : ❌ 未配置（需先初始化）"
+	fi
+	echo "dnsmasq    : PID $(pidof dnsmasq 2>/dev/null || echo 未运行)"
+	if [ "$N" -gt 0 ]; then
+		echo "当前状态   : 🟢 已开启（$N 条）"
+	else
+		echo "当前状态   : ⚪ 已关闭"
+	fi
+	;;
+check)
+	echo "=== 1. uci 配置 ==="
+	uci -q show dhcp.@dnsmasq[0].addnhosts || echo "  未配置"
+	echo "=== 2. 运行时配置里有没有 addn-hosts ==="
+	grep -h 'addn-hosts' /var/etc/dnsmasq.conf.* 2>/dev/null | head -3 || echo "  没有"
+	echo "=== 3. dnsmasq 进程 ==="
+	ps w | grep 'sbin/dnsmasq' | grep -v grep || echo "  未运行"
+	echo "=== 4. hosts 文件 ==="
+	[ -s "$HOSTS" ] && { echo "  行数 $(wc -l < "$HOSTS")"; head -2 "$HOSTS"; } || echo "  空/不存在"
+	echo "=== 4b. jail 挂载是否失效（出现 //deleted 即失效，需 restart 一次）==="
+	BAD=0
+	for p in $(pidof dnsmasq); do
+		M=$(grep 'anti-ad.hosts' /proc/$p/mountinfo 2>/dev/null)
+		[ -n "$M" ] && { echo "  PID $p: $M"; case "$M" in *//deleted*) BAD=1;; esac; }
+	done
+	[ "$BAD" = "1" ] && echo "  ❌ 挂载指向已删除的 inode，dnsmasq 读不到新内容 → 需 /etc/init.d/dnsmasq restart"
+	[ "$BAD" = "0" ] && echo "  ✅ 挂载正常"
+	echo "=== 5. 解析实测 ==="
+	echo -n "  广告域名 000491b06a.com -> "
+	nslookup 000491b06a.com 127.0.0.1 2>&1 | grep -A2 'Name:' | tail -3 | tr '\n' ' '
+	echo ""
+	echo -n "  正常域名 www.baidu.com  -> "
+	nslookup www.baidu.com 127.0.0.1 2>&1 | grep -A2 'Name:' | tail -3 | tr '\n' ' '
+	echo ""
+	echo "=== 6. Open-Box ==="
+	pidof sing-box >/dev/null 2>&1 && echo "  sing-box 运行中" || echo "  sing-box 未运行"
+	ip -br a show openbox-tun 2>/dev/null | head -1
+	;;
+*)
+	echo "用法: anti-ad {on|off|status|check}"
+	exit 1
+	;;
+esac

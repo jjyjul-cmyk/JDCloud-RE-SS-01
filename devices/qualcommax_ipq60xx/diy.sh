@@ -27,32 +27,7 @@ rm -rf package/nss-packages/nss-userspace-oss
 
 sed -i "s/luci uboot-envtools wpad-openssl/luci uboot-envtools wpad-mbedtls/" target/linux/qualcommax/Makefile
 
-# ==========================================================
-#  以下为「无 WiFi」定制：把无线相关全部剥离
-# ==========================================================
-
-# 1) 摘掉亚瑟设备定义里强制携带的 WiFi 板级校准数据
-#    （原：DEVICE_PACKAGES := ipq-wifi-jdcloud_re-ss-01）
-sed -i 's/^\([[:space:]]*\)DEVICE_PACKAGES := ipq-wifi-jdcloud_re-ss-01/\1DEVICE_PACKAGES :=/' \
-    target/linux/qualcommax/image/ipq60xx.mk
-
-# 2) 从 qualcommax 默认包里剔除 wpad / hostapd / 无线固件 / wifi-scripts
-sed -i -e 's/ wpad-[a-z0-9_-]*//g' \
-       -e 's/ hostapd[a-z0-9_-]*//g' \
-       -e 's/ ath11k-firmware[a-z0-9_-]*//g' \
-       -e 's/ wifi-scripts//g' \
-       -e 's/ iwinfo//g' \
-       -e 's/ iw//g' \
-       target/linux/qualcommax/Makefile
-
-# 3) 直接删掉无线软件包目录，杜绝被依赖重新拉起
-rm -rf package/firmware/ath11k-firmware
-rm -rf package/firmware/ipq-wifi
-rm -rf package/firmware/wireless-regdb
-
-# 4) 关掉无线驱动内核模块（kmod 层面）
-sed -i 's/^CONFIG_PACKAGE_kmod-ath11k.*$/# CONFIG_PACKAGE_kmod-ath11k is not set/' .config 2>/dev/null
-sed -i 's/^CONFIG_PACKAGE_kmod-mac80211.*$/# CONFIG_PACKAGE_kmod-mac80211 is not set/' .config 2>/dev/null
+# 带 WiFi 版：保留 ath11k / wpad / wifi-scripts 全套无线栈（不剥离）
 
 # ==========================================================
 #  USB：确认 dwc3 / PHY 驱动在内核里开启（亚瑟 USB3.0 走 dwc3）

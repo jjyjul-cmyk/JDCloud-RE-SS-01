@@ -1,0 +1,90 @@
+#!/bin/sh
+# ============================================================
+#  zzzz-jdcloud-restore — JDCloud RE-SS-01 定制固化
+#  随固件编译进只读分区，恢复出厂 / 重刷后首次启动自动执行。
+#  只补缺失项，不覆盖用户运行时改动；可安全重复执行。
+# ============================================================
+
+logger -t jd-restore "apply 1.1 custom defaults (once)"
+
+# ---- 0) LAN IP 锁定为 192.168.5.1 ----
+#  Kwrt 25.12 的 config_generate 默认 IP 是 10.0.0.1；
+#  files/etc/config/network + 本脚本强制锁定为热备地址 192.168.5.1。
+uci set network.lan.ipaddr='192.168.5.1'
+uci set network.lan.netmask='255.255.255.0'
+uci commit network 2>/dev/null
+
+# ---- 1) 可执行位（tar/overlay 可能丢失，尤其是 adb 三个二进制）----
+chmod +x /usr/bin/anti-ad /usr/bin/anti-ad-schedule 2>/dev/null
+for f in /usr/libexec/mytvsuper-autostart/adb/adb-*; do
+	[ -e "$f" ] && chmod +x "$f" 2>/dev/null
+done
+chmod +x /etc/init.d/mytvsuper-autostart 2>/dev/null
+chmod +x /usr/libexec/mytvsuper-autostart/bin/watch.sh 2>/dev/null
+
+# ---- 2) 中文语言（files/etc/config/luci 已预置，这里兜底防 autoset 覆盖）----
+uci -q get luci.main.lang >/dev/null 2>&1 || uci set luci.main.lang='zh_cn'
+uci -q get luci.main.mediaurlbase >/dev/null 2>&1 || uci set luci.main.mediaurlbase='/luci-static/argon'
+uci -q get luci.internal.languages.zh_cn >/dev/null 2>&1 || uci set luci.internal.languages.zh_cn='简体中文 (Simplified Chinese)'
+uci commit luci 2>/dev/null
+
+# ---- 3) anti-AD 默认配置（关闭状态 + 时段；只在配置缺失时写）----
+if [ ! -s /etc/config/anti-ad ]; then
+	cat > /etc/config/anti-ad <<'__EOF__'
+config anti-ad 'main'
+	option enabled '0'
+
+config timeslot
+	option day 'daily'
+	option start '18:30'
+	option stop '19:30'
+
+config timeslot
+	option day 'weekday'
+	option start '20:30'
+	option stop '22:30'
+__EOF__
+	uci commit anti-ad 2>/dev/null
+fi
+# hosts 文件必须存在（dnsmasq 启用时按 addn-hosts 读取）
+[ -f /etc/anti-ad.hosts ] || : > /etc/anti-ad.hosts
+
+# ---- 4) myTV 默认配置（关闭状态；只在配置缺失时写）----
+if [ ! -s /etc/config/mytvsuper-autostart ]; then
+	cat > /etc/config/mytvsuper-autostart <<'__EOF__'
+config main 'main'
+	option enabled '0'
+	option tv_ip '192.168.5.148'
+	option box_ip '192.168.5.140'
+	option box_port '5555'
+	option channel '81'
+	option interval '10'
+	option cooldown '300'
+	option startup_trigger '1'
+__EOF__
+	uci commit mytvsuper-autostart 2>/dev/null
+fi
+
+# ---- 5) CPU 频率性能档（1.1 OPP 上限 1200MHz）----
+uci -q get cpufreq.@settings[0].governor0 >/dev/null 2>&1 || {
+	uci add cpufreq settings >/dev/null 2>&1
+	uci set cpufreq.@settings[-1].governor0='performance'
+	uci set cpufreq.@settings[-1].minfreq0='864000'
+	uci set cpufreq.@settings[-1].maxfreq0='1200000'
+	uci commit cpufreq 2>/dev/null
+}
+uci -q get cpufreq.global.set >/dev/null 2>&1 || {
+	uci set cpufreq.global=global
+	uci set cpufreq.global.set='1'
+	uci commit cpufreq 2>/dev/null
+}
+
+# ---- 6) CPU 占用采样脚本 /sbin/cpuusage ----
+#        25.12 的 LuCI 状态页结构可能与 24.10 不同；cpuusage 文件已随 files/ 固化，
+#        rpcd/luci 若含旧的 /sbin/usage 调用则补替换（找不到就跳过，无副作用）。
+if [ -x /sbin/cpuusage ] && [ -f /usr/share/rpcd/ucode/luci ]; then
+	grep -q '/sbin/usage' /usr/share/rpcd/ucode/luci 2>/dev/null && \
+		sed -i 's|/sbin/usage|/sbin/cpuusage|g' /usr/share/rpcd/ucode/luci 2>/dev/null
+fi
+
+logger -t jd-restore "done"
