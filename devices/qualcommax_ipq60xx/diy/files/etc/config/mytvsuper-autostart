@@ -1,0 +1,11 @@
+
+config main 'main'
+	option enabled '0'
+	option tv_ip '192.168.5.148'
+	option box_ip '192.168.5.140'
+	option box_port '5555'
+	option channel '81'
+	option interval '10'
+	option cooldown '300'
+	option startup_trigger '1'
+
