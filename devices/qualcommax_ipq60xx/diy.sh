@@ -63,3 +63,13 @@ done
 #  主机名固定为 Kwrt（官方已全局替换，这里做二次保险）
 # ==========================================================
 sed -i "s/OpenWrt/Kwrt/g" package/base-files/files/bin/config_generate 2>/dev/null || true
+
+# ===== FIX 2026-11-19: xray-core go.mod 要求 go>=1.27 =====
+# OpenWrt golang-package.mk 写死 GOTOOLCHAIN=local，导致 go1.26 编译 xray-core 失败。
+# 改成 auto 让 go 自动下载匹配的 1.27 工具链。
+if [ -f feeds/packages/lang/golang/golang-package.mk ]; then
+    sed -i 's/GOTOOLCHAIN=local/GOTOOLCHAIN=auto/g' feeds/packages/lang/golang/golang-package.mk
+    echo "[FIX] GOTOOLCHAIN set to auto in golang-package.mk"
+else
+    echo "[FIX][WARN] golang-package.mk not found at diy time"
+fi
