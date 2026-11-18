@@ -1,0 +1,12 @@
+--- a/feeds/packages/lang/golang/golang-package.mk
++++ b/feeds/packages/lang/golang/golang-package.mk
+@@ -221,7 +221,7 @@ define GoBuild/Compile
+ 	GOPATH="$(GO_PKG_BUILD_DIR)" \
+ 	GOCACHE="$(GO_BUILD_CACHE_DIR)" \
+ 	GOMODCACHE="$(GO_MOD_CACHE_DIR)" \
+ 	GOENV=off \
+-	GOTOOLCHAIN=local
++	GOTOOLCHAIN=auto
+ 
+ GO_PKG_VARS= \
+ 	$(GO_BIN_PATH) \
