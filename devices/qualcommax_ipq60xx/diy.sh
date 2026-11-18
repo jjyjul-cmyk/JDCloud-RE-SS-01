@@ -22,6 +22,19 @@ rm -rf feeds/kiddin9/shortcut-fe
 git clone --depth 1 -b NSS-12.5-K6.x https://github.com/qosmio/nss-packages.git package/nss-packages
 git clone --depth 1 https://github.com/qosmio/sqm-scripts-nss.git package/sqm-scripts-nss
 
+
+# ===== FIX 2026-11-19: ECM notifier 与内核 6.12 CHAIN_EVENTS 不兼容 =====
+# LiBwrt 内核启用 CONFIG_NF_CONNTRACK_CHAIN_EVENTS 后，0006 patch 强改为旧的
+# nf_ct_event_notifier API（.ct_event），与内核新的 notifier_block 签名冲突，
+# 编译报 ecm_conntrack_notifier.c: wrong argument type / too few arguments。
+# ECM 源码本身已完整支持 CHAIN_EVENTS，禁用该 patch 即可恢复原生兼容分支。
+if [ -f package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch ]; then
+    mv package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch \
+       package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch.disabled
+    echo "[FIX-ECM] disabled 0006 notifier patch (use native CHAIN_EVENTS)"
+fi
+
+
 sed -i "/ECM_INTERFACE_RAWIP_ENABLE/d"  package/nss-packages/qca-nss-ecm/Makefile
 rm -rf package/nss-packages/nss-userspace-oss
 
