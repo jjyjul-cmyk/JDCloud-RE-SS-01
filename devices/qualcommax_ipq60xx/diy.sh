@@ -28,21 +28,22 @@ git clone --depth 1 https://github.com/qosmio/sqm-scripts-nss.git package/sqm-sc
 # nf_ct_event_notifier API（.ct_event），与内核新的 notifier_block 签名冲突，
 # 编译报 ecm_conntrack_notifier.c: wrong argument type / too few arguments。
 # ECM 源码本身已完整支持 CHAIN_EVENTS，禁用该 patch 即可恢复原生兼容分支。
-if [ -f package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch ]; then
-    mv package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch \
-       package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch.disabled
-    echo "[FIX-ECM] disabled 0006 notifier patch (use native CHAIN_EVENTS)"
-fi
+# [FIX-ECM2] Renaming to .disabled does NOT work: OpenWrt applies EVERY file in
+# patches/ regardless of suffix (log proved 0006.patch.disabled was applied).
+# Must DELETE the file so ECM source stays native with CONFIG_NF_CONNTRACK_CHAIN_EVENTS.
+rm -f package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch
+rm -f package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-changes-for-5.15.patch.disabled
+echo "[FIX-ECM2] DELETED 0006 notifier patch (native CHAIN_EVENTS new API)"
 
 
 # ===== FIX 2026-11-19b: bypass build_dir cache for ECM =====
 # cachewrtbuild caches build_dir with old 0006-patched ECM source.
-# Renaming the patch file does NOT force re-prepare of cached source.
+# Cache keeps old 0006-patched source. Bump version again (k6d) to re-extract clean.
 # Bump PKG_VERSION -> build_dir path changes -> cache miss -> re-extract + re-patch
 # with 0006 disabled -> native CONFIG_NF_CONNTRACK_CHAIN_EVENTS (new API) is used.
 if [ -f package/nss-packages/qca-nss-ecm/Makefile ]; then
-    sed -i 's|^PKG_VERSION:=.*|PKG_VERSION:=$(QSDK_VERSION).$(subst -,.,$(PKG_SOURCE_DATE))~$(PKG_SOURCE_VERSION)k6c|' package/nss-packages/qca-nss-ecm/Makefile
-    echo "[FIX-CACHE] ECM PKG_VERSION bumped (k6c) to bypass build_dir cache"
+    sed -i 's|^PKG_VERSION:=.*|PKG_VERSION:=$(QSDK_VERSION).$(subst -,.,$(PKG_SOURCE_DATE))~$(PKG_SOURCE_VERSION)k6d|' package/nss-packages/qca-nss-ecm/Makefile
+    echo "[FIX-CACHE2] ECM PKG_VERSION bumped (k6d) to bypass build_dir cache"
 fi
 
 
