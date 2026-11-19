@@ -35,6 +35,18 @@ if [ -f package/nss-packages/qca-nss-ecm/patches/0006-treewide-rework-notifier-c
 fi
 
 
+# ===== FIX 2026-11-19b: bypass build_dir cache for ECM =====
+# cachewrtbuild caches build_dir with old 0006-patched ECM source.
+# Renaming the patch file does NOT force re-prepare of cached source.
+# Bump PKG_VERSION -> build_dir path changes -> cache miss -> re-extract + re-patch
+# with 0006 disabled -> native CONFIG_NF_CONNTRACK_CHAIN_EVENTS (new API) is used.
+if [ -f package/nss-packages/qca-nss-ecm/Makefile ]; then
+    sed -i 's|^PKG_VERSION:=.*|PKG_VERSION:=$(QSDK_VERSION).$(subst -,.,$(PKG_SOURCE_DATE))~$(PKG_SOURCE_VERSION)k6c|' package/nss-packages/qca-nss-ecm/Makefile
+    echo "[FIX-CACHE] ECM PKG_VERSION bumped (k6c) to bypass build_dir cache"
+fi
+
+
+
 sed -i "/ECM_INTERFACE_RAWIP_ENABLE/d"  package/nss-packages/qca-nss-ecm/Makefile
 rm -rf package/nss-packages/nss-userspace-oss
 
