@@ -51,6 +51,22 @@ fi
 sed -i "/ECM_INTERFACE_RAWIP_ENABLE/d"  package/nss-packages/qca-nss-ecm/Makefile
 rm -rf package/nss-packages/nss-userspace-oss
 
+# ===== FIX 2026-11-19c: qca-nss-clients 0031 patch uses dev->netns_local (removed in 6.12.116) =====
+# 0031-kernel-6.12-support.patch writes "dev->netns_local = true;" under #else for
+# kernel > 6.10, but struct net_device.netns_local was removed in newer 6.12.116.
+# Replace that assignment with a C comment (keeps patch line count/format valid).
+P0031=package/nss-packages/qca-nss-clients/patches/0031-kernel-6.12-support.patch
+if [ -f "$P0031" ]; then
+    sed -i 's|dev->netns_local = true;|/* netns_local removed in 6.12.116 */|g' "$P0031"
+    echo "[FIX-NSSCLIENTS] 0031 netns_local -> comment"
+fi
+# bump qca-nss-clients version so build_dir path changes -> re-prepare + re-apply patches
+if [ -f package/nss-packages/qca-nss-clients/Makefile ]; then
+    sed -i 's|^PKG_VERSION:=.*|PKG_VERSION:=$(QSDK_VERSION).$(subst -,.,$(PKG_SOURCE_DATE))~$(PKG_SOURCE_VERSION)k6f|' package/nss-packages/qca-nss-clients/Makefile
+    echo "[FIX-NSSCLIENTS] PKG_VERSION bumped (k6f)"
+fi
+
+
 sed -i "s/luci uboot-envtools wpad-openssl/luci uboot-envtools wpad-mbedtls/" target/linux/qualcommax/Makefile
 
 # ==========================================================
